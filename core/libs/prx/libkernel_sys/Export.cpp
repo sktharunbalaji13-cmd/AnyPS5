@@ -8,13 +8,17 @@
 #include <system_error>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/File/include/File.hpp"
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
 namespace {
 constexpr int GuestEnoent = 2;
 constexpr int GuestEio = 5;
+constexpr int GuestEbadf = 9;
 constexpr int GuestEfault = 14;
+constexpr int GuestEnotdir = 20;
 constexpr int GuestEinval = 22;
 
 std::int64_t Fail(int error) {
@@ -46,6 +50,15 @@ std::int64_t APS5_VABI readlink_nid_postfix(const char* path, char* buffer, std:
     if (count != 0 && buffer == nullptr) return Fail(GuestEfault);
     if (count != 0) std::memcpy(buffer, target.data(), count);
     return static_cast<std::int64_t>(count);
+}
+
+int APS5_VABI fchdir_nid_postfix(int fd) {
+    if (!DescriptorIsOpen_nid_no_patch(fd)) return static_cast<int>(Fail(GuestEbadf));
+    const auto path = File::DirectoryDescriptorPath(fd);
+    if (!path) return static_cast<int>(Fail(GuestEnotdir));
+    const int error = SetWorkingDirectory_nid_no_patch(*path);
+    if (error != 0) return static_cast<int>(Fail(error));
+    return 0;
 }
 
 }

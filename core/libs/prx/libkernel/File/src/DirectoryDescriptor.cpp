@@ -92,4 +92,22 @@ int ReadDirectoryDescriptor(int fd, char* buf, int nbytes) {
 
 }
 
+#else
+
+#include <string>
+
+namespace File {
+
+std::optional<std::filesystem::path> DirectoryDescriptorPath(int fd) {
+    if (fd < 0) return std::nullopt;
+    std::error_code error;
+    const auto link = std::filesystem::path("/proc/self/fd") / std::to_string(fd);
+    const auto target = std::filesystem::read_symlink(link, error);
+    if (error) return std::nullopt;
+    if (!std::filesystem::is_directory(target, error)) return std::nullopt;
+    return target;
+}
+
+}
+
 #endif
