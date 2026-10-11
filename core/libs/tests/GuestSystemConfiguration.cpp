@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 extern "C" {
 std::int64_t APS5_VABI sysconf_nid_postfix(int);
@@ -10,6 +11,13 @@ int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sysctl_nid_postfix(const int*, std::uint32_t, void*, std::size_t*, const void*, std::size_t);
 int APS5_VABI sysctlbyname_nid_postfix(const char*, void*, std::size_t*, const void*, std::size_t);
 extern char** environ_nid_postfix;
+struct SceKernelProsperoSystemSwVersion {
+    std::uint64_t size;
+    char versionString[0x1C];
+    std::uint32_t version;
+    std::uint64_t reserved;
+};
+int APS5_VABI sceKernelGetProsperoSystemSwVersion_nid_postfix(SceKernelProsperoSystemSwVersion*);
 }
 static void Require(bool value) { if (!value) std::abort(); }
 static void CheckProcessorCountSysctl() {
@@ -52,8 +60,25 @@ static void CheckProcessorCountSysctl() {
     }
     Require(threw);
 }
+static void CheckProsperoSystemSwVersion() {
+    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(nullptr) == static_cast<int>(0x8002000Eu));
+    SceKernelProsperoSystemSwVersion mismatch{};
+    mismatch.size = sizeof(mismatch) - 8;
+    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(&mismatch) == static_cast<int>(0x80020016u));
+    SceKernelProsperoSystemSwVersion version{};
+    version.size = sizeof(version);
+    std::memset(version.versionString, 0x5a, sizeof(version.versionString));
+    version.version = 0xdeadbeefu;
+    version.reserved = 0xdeadbeefdeadbeefu;
+    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(&version) == 0);
+    Require(version.size == sizeof(version));
+    Require(std::strcmp(version.versionString, "01.000.000") == 0);
+    Require(version.version == 0x01000000u);
+    Require(version.reserved == 0);
+}
 int main() {
     CheckProcessorCountSysctl();
+    CheckProsperoSystemSwVersion();
     *__error_nid_postfix() = 13;
     Require(sysconf_nid_postfix(47) == 0x4000);
     Require(getpagesize_nid_postfix() == sysconf_nid_postfix(47));

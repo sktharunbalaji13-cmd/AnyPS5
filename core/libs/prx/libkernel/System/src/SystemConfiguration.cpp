@@ -1,5 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -105,5 +106,26 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
     if (std::strcmp(name, "hw.ncpu") != 0) throw std::runtime_error(std::string(__func__) + ": unsupported name " + name);
     static constexpr int mib[] = {6, 3};
     return sysctl_nid_postfix(mib, 2, oldValue, oldLength, newValue, newLength);
+}
+
+struct SceKernelProsperoSystemSwVersion {
+    std::uint64_t size;
+    char versionString[0x1C];
+    std::uint32_t version;
+    std::uint64_t reserved;
+};
+
+int APS5_VABI sceKernelGetProsperoSystemSwVersion_nid_postfix(SceKernelProsperoSystemSwVersion* version) {
+    if (version == nullptr) {
+        return SCE_KERNEL_ERROR_EFAULT;
+    }
+    if (version->size != sizeof(SceKernelProsperoSystemSwVersion)) {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    std::memset(version->versionString, 0, sizeof(version->versionString));
+    std::memcpy(version->versionString, "01.000.000", sizeof("01.000.000"));
+    version->version = 0x01000000;
+    version->reserved = 0;
+    return 0;
 }
 }
