@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -61,20 +62,22 @@ static void CheckProcessorCountSysctl() {
     Require(threw);
 }
 static void CheckProsperoSystemSwVersion() {
-    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(nullptr) == static_cast<int>(0x8002000Eu));
-    SceKernelProsperoSystemSwVersion mismatch{};
-    mismatch.size = sizeof(mismatch) - 8;
-    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(&mismatch) == static_cast<int>(0x80020016u));
-    SceKernelProsperoSystemSwVersion version{};
-    version.size = sizeof(version);
-    std::memset(version.versionString, 0x5a, sizeof(version.versionString));
-    version.version = 0xdeadbeefu;
-    version.reserved = 0xdeadbeefdeadbeefu;
-    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(&version) == 0);
-    Require(version.size == sizeof(version));
-    Require(std::strcmp(version.versionString, "01.000.000") == 0);
-    Require(version.version == 0x01000000u);
-    Require(version.reserved == 0);
+    *__error_nid_postfix() = 13;
+    Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EFAULT &&
+        *__error_nid_postfix() == 13);
+    for (const std::uint64_t size : {std::uint64_t{0}, std::uint64_t{0x28}, sizeof(SceKernelProsperoSystemSwVersion)}) {
+        SceKernelProsperoSystemSwVersion version{};
+        version.size = size;
+        std::memset(version.versionString, 0x5a, sizeof(version.versionString));
+        version.version = 0xdeadbeefu;
+        version.reserved = 0xdeadbeefdeadbeefu;
+        *__error_nid_postfix() = 13;
+        Require(sceKernelGetProsperoSystemSwVersion_nid_postfix(&version) == 0 && *__error_nid_postfix() == 13);
+        Require(version.size == size);
+        Require(std::strcmp(version.versionString, "01.000.000") == 0);
+        Require(version.version == 0x01000000u);
+        Require(version.reserved == 0);
+    }
 }
 int main() {
     CheckProcessorCountSysctl();

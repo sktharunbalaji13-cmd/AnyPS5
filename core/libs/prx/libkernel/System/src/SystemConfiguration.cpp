@@ -119,9 +119,6 @@ int APS5_VABI sceKernelGetProsperoSystemSwVersion_nid_postfix(SceKernelProsperoS
     if (version == nullptr) {
         return SCE_KERNEL_ERROR_EFAULT;
     }
-    if (version->size != sizeof(SceKernelProsperoSystemSwVersion)) {
-        return SCE_KERNEL_ERROR_EINVAL;
-    }
     std::memset(version->versionString, 0, sizeof(version->versionString));
     std::memcpy(version->versionString, "01.000.000", sizeof("01.000.000"));
     version->version = 0x01000000;
