@@ -549,6 +549,12 @@ int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
     return PosixResult(sceKernelOpen(path, flags, static_cast<std::uint16_t>(mode)));
 }
 
+int APS5_VABI creat_nid_postfix(const char* path, int mode) {
+    if (const int error = PathError(path)) return PosixFailure(error);
+    return PosixResult(sceKernelOpen(path, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC,
+        static_cast<std::uint16_t>(mode)));
+}
+
 int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
     int mode = 0;
     if (flags & SCE_KERNEL_O_CREAT) {

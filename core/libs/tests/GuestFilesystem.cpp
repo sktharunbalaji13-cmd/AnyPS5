@@ -31,6 +31,7 @@ int APS5_VABI sceKernelTruncate_nid_postfix(const char*, long long);
 int APS5_VABI sceKernelUtimes_nid_postfix(const char*, const void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI _open_nid_postfix(const char*, int, ...);
+int APS5_VABI creat_nid_postfix(const char*, int);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI flock_nid_postfix(int, int);
 int APS5_VABI stat_nid_postfix(const char*, FileStat*);
@@ -392,6 +393,20 @@ int main() {
     Require(_open_nid_postfix("", 0) == -1 && *__error_nid_postfix() == 2);
     Require(open_nid_postfix(nullptr, 0, 0) == -1 && *__error_nid_postfix() == 14);
     Require(_open_nid_postfix(nullptr, 0) == -1 && *__error_nid_postfix() == 14);
+    const auto created = root / "created.txt";
+    const int createdDescriptor = creat_nid_postfix(created.string().c_str(), 0644);
+    Require(createdDescriptor >= 0);
+    Require(write_nid_postfix(createdDescriptor, "created", 7) == 7 && close_nid_postfix(createdDescriptor) == 0);
+    Require(std::filesystem::file_size(created) == 7);
+    const int truncatedDescriptor = creat_nid_postfix(created.string().c_str(), 0600);
+    Require(truncatedDescriptor >= 0 && close_nid_postfix(truncatedDescriptor) == 0);
+    Require(std::filesystem::file_size(created) == 0);
+    Require(unlink_nid_postfix(created.string().c_str()) == 0);
+    Require(creat_nid_postfix((root / "absent" / "child.txt").string().c_str(), 0644) == -1 &&
+        *__error_nid_postfix() == 2);
+    Require(creat_nid_postfix(rootName.c_str(), 0644) == -1 && *__error_nid_postfix() == 21);
+    Require(creat_nid_postfix("", 0644) == -1 && *__error_nid_postfix() == 2);
+    Require(creat_nid_postfix(nullptr, 0644) == -1 && *__error_nid_postfix() == 14);
     Require(rmdir_nid_postfix(rootName.c_str()) == -1 && *__error_nid_postfix() == 66);
     Require(sceKernelRmdir(rootName.c_str()) == static_cast<int>(0x80020042u));
     Require(rmdir_nid_postfix(presentName.c_str()) == -1 && *__error_nid_postfix() == 20);
