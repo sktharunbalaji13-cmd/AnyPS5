@@ -332,6 +332,11 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
     bool spinning = pauseSpin;
     std::uint32_t polls = 0;
     StallWatch stall(queue);
+    // The wait's own timer: the timeout report below is reset by any packet anywhere, so a
+    // wait that never ends in a busy run never reports. This one counts the wait's own time
+    // and names the awaited address, the value it holds and the writers of that range.
+    const auto waitStart = std::chrono::steady_clock::now();
+    bool waitReported = false;
     while (!Pm4::WaitSatisfiedUnchecked(packet)) {
         if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer)) {
             if (writer != queue) notePendingWait(packet, queue, received);
@@ -361,6 +366,21 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             lastDone = done;
             start = std::chrono::steady_clock::now();
             stall.Progressed();
+        }
+        if (!waitReported && std::chrono::steady_clock::now() - waitStart > std::chrono::seconds(5)) {
+            waitReported = true;
+            const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
+            const auto reference = wide ? packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u) : packet[4];
+            const auto mask = wide ? packet[6] | (static_cast<std::uint64_t>(packet[7]) << 32u) : packet[5];
+            const auto current = wide ? *reinterpret_cast<const volatile std::uint64_t*>(awaited) : *reinterpret_cast<const volatile std::uint32_t*>(awaited);
+            std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM%s at 0x%llx has waited %lld ms (function %u ref 0x%llx mask 0x%llx value 0x%llx)\n",
+                         queue, wide ? "_64" : "", static_cast<unsigned long long>(awaited),
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count()),
+                         packet[1] & 7u, static_cast<unsigned long long>(reference), static_cast<unsigned long long>(mask), static_cast<unsigned long long>(current));
+            for (const auto& record : writeHistory()) {
+                if (record.length != 0 && record.target <= awaited && awaited < record.target + std::max<std::uint64_t>(record.length, 4))
+                    std::fprintf(stderr, "[gpu]   earlier write by queue 0x%x opcode 0x%x at 0x%llx+0x%llx\n", record.queue, record.opcode, static_cast<unsigned long long>(record.target), static_cast<unsigned long long>(record.length));
+            }
         }
         stall.Check(((packet[0] >> 8u) & 0xffu) == 0x93u ? "WAIT_REG_MEM_64 at" : "WAIT_REG_MEM at", awaited);
 

@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
 #include <bit>
@@ -243,7 +244,11 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
     const auto opValue = refMask >> 24u;
     auto reference = test;
     auto fixed = compare == 0 || compare == 7 ? 0u : face.compareMask;
-    const auto convert = [&](std::uint32_t op) {
+    // A replacement against a stencil value the test makes known is drawn as an inversion
+    // of the bits that differ from it, with the write mask narrowed to those bits.
+    std::uint32_t invertMask = 0;
+    std::uint32_t inverted = 0;
+    const auto convert = [&](std::uint32_t op, bool testFailed) {
         if (face.writeMask == 0) return VK_STENCIL_OP_KEEP;
         char detail[96];
         switch (op) {
@@ -258,6 +263,20 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
                 }
                 const auto value = op == 2 ? 0xffu : op == 3 ? test : opValue;
                 if (((reference ^ value) & fixed & face.writeMask) != 0) {
+                    // The stencil value the test compares against is known when the test
+                    // pins it: an equal or greater-or-equal test on the compare mask's
+                    // high bits, a not-equal test on zero, and so on. The replacement then
+                    // flips exactly the bits that differ from that value.
+                    const auto compared = test & face.compareMask;
+                    const bool passKnown = compare == 2 || (compare == 3 && compared == face.compareMask) || (compare == 6 && compared == 0u);
+                    const bool failKnown = compare == 5 || (compare == 1 && compared == 0u) || (compare == 4 && compared == face.compareMask);
+                    const bool testValueKnown = testFailed ? failKnown : passKnown;
+                    const auto flipped = (test ^ value) & face.writeMask;
+                    if (testValueKnown && (face.writeMask & ~face.compareMask) == 0 && (invertMask == 0 || invertMask == flipped)) {
+                        invertMask = flipped;
+                        ++inverted;
+                        return VK_STENCIL_OP_INVERT;
+                    }
                     std::snprintf(detail, sizeof(detail), "AGC graphics: stencil replacement 0x%02x against test value 0x%02x (masks 0x%02x/0x%02x) is unsupported", value, test, face.compareMask, face.writeMask);
                     throw std::runtime_error(detail);
                 }
@@ -280,9 +299,14 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
                 throw std::runtime_error(detail);
         }
     };
-    face.failOp = convert(ops & 0xfu);
-    face.passOp = convert((ops >> 4u) & 0xfu);
-    face.depthFailOp = convert((ops >> 8u) & 0xfu);
+    face.failOp = convert(ops & 0xfu, true);
+    face.passOp = convert((ops >> 4u) & 0xfu, false);
+    face.depthFailOp = convert((ops >> 8u) & 0xfu, false);
+    if (invertMask != 0) {
+        const auto active = ((ops & 0xfu) != 0u) + (((ops >> 4u) & 0xfu) != 0u) + (((ops >> 8u) & 0xfu) != 0u);
+        if (inverted != active) throw std::runtime_error("AGC graphics: a stencil replacement drawn as an inversion beside another stencil operation is unsupported");
+        face.writeMask = invertMask;
+    }
     face.reference = reference;
     return face;
 }
@@ -1193,7 +1217,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     if (depthKeepsSampleZero && (read(cx, 0x292) & 1u) == 0) {
         const bool filled = result.topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
         const auto sampleInputs = read(cx, 0x1b3) & read(cx, 0x1b4) & (ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::SampleCoverage));
-        Require(filled && !result.alphaToCoverage && (PixelProgramSkipped(queue) || ((read(cx, 0x293) & PixelShaderIteratesSamples) == 0 && sampleInputs == 0)) && (read(cx, 0x203) & 0x100u) == 0 && (read(cx, 0x201) & 0x0f0c0000u) == 0, "a one-sample depth target under a multisampled rasterizer without MSAA_ENABLE is unsupported for points or lines and with alpha-to-coverage, PS_ITER_SAMPLE, a sample index or coverage input, a sample-mask export, or DB_EQAA Z interpolation or overrasterization");
+        Require(filled && !result.alphaToCoverage && (PixelProgramSkipped(queue) || sampleInputs == 0) && (read(cx, 0x203) & 0x100u) == 0 && (read(cx, 0x201) & 0x0f0c0000u) == 0, "a one-sample depth target under a multisampled rasterizer without MSAA_ENABLE is unsupported for points or lines and with alpha-to-coverage, a sample index or coverage input, a sample-mask export, or DB_EQAA Z interpolation or overrasterization");
         result.samples = 1;
         result.customSampleLocations = false;
         result.sampleLocations.fill(0);
@@ -1366,6 +1390,48 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         result.depthBias = false;
     }
     APS5_LOG_OUT_DEBUG("Viewport x=%f y=%f w=%f h=%f minDepth=%f maxDepth=%f", result.viewport.x, result.viewport.y, result.viewport.width, result.viewport.height, result.viewport.minDepth, result.viewport.maxDepth);
+    // Mission 8: the viewport's provenance, from the raw context registers to the value that
+    // is about to be stored in the state. The raw bits are reported so a genuine zero can be
+    // told from a fixed-point value read as a float.
+    if (ViewportTrace::Enabled()) {
+        auto& counters = ViewportTrace::Stats();
+        counters.decodes.fetch_add(1, std::memory_order_relaxed);
+        const auto rawScaleX = read(cx, ViewportTrace::ScaleX);
+        const auto rawOffsetX = read(cx, ViewportTrace::OffsetX);
+        const auto rawScaleY = read(cx, ViewportTrace::ScaleY);
+        const auto rawOffsetY = read(cx, ViewportTrace::OffsetY);
+        const auto rawScaleZ = read(cx, ViewportTrace::ScaleZ);
+        const auto rawOffsetZ = read(cx, ViewportTrace::OffsetZ);
+        const auto scaleClass = ViewportTrace::Classify(xs);
+        const auto offsetXClass = ViewportTrace::Classify(xo);
+        const auto offsetYClass = ViewportTrace::Classify(yo);
+        if (scaleClass == ViewportTrace::Value::Zero) counters.zeroScale.fetch_add(1, std::memory_order_relaxed);
+        if (scaleClass == ViewportTrace::Value::Denormal) counters.denormalScale.fetch_add(1, std::memory_order_relaxed);
+        if (rawScaleX == 0x3f800000u && rawScaleY == 0x3f800000u) counters.defaultScale.fetch_add(1, std::memory_order_relaxed);
+        if (collapsed) counters.collapsed.fetch_add(1, std::memory_order_relaxed);
+        else counters.normal.fetch_add(1, std::memory_order_relaxed);
+        const bool degenerate = result.viewport.width == 0.0f || result.viewport.height == 0.0f;
+        if (result.viewport.width == 0.0f) counters.zeroWidth.fetch_add(1, std::memory_order_relaxed);
+        if (result.viewport.height == 0.0f) counters.zeroHeight.fetch_add(1, std::memory_order_relaxed);
+        if (ViewportTrace::Sampler().Admit(degenerate)) {
+            Aps5Diag::Event("viewport",
+                            "event=state reason=%s branch=%s xs=%s xo=%s ys=%s yo=%s zs=%s zo=%s "
+                            "raw=0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x class=%s,%s,%s,%s "
+                            "viewport=x=%s y=%s w=%s h=%s min=%s max=%s degenerate=%d extent=%ux%u scissor=%u,%u,%u,%u",
+                            ViewportTrace::Sampler().ReasonName(), collapsed ? "collapsed" : "normal",
+                            ViewportTrace::FormatFloat(xs).c_str(), ViewportTrace::FormatFloat(xo).c_str(),
+                            ViewportTrace::FormatFloat(ys).c_str(), ViewportTrace::FormatFloat(yo).c_str(),
+                            ViewportTrace::FormatFloat(zs).c_str(), ViewportTrace::FormatFloat(zo).c_str(),
+                            rawScaleX, rawOffsetX, rawScaleY, rawOffsetY, rawScaleZ, rawOffsetZ,
+                            ViewportTrace::ValueName(scaleClass), ViewportTrace::ValueName(offsetXClass),
+                            ViewportTrace::ValueName(ViewportTrace::Classify(ys)), ViewportTrace::ValueName(offsetYClass),
+                            ViewportTrace::FormatFloat(result.viewport.x).c_str(), ViewportTrace::FormatFloat(result.viewport.y).c_str(),
+                            ViewportTrace::FormatFloat(result.viewport.width).c_str(), ViewportTrace::FormatFloat(result.viewport.height).c_str(),
+                            ViewportTrace::FormatFloat(result.viewport.minDepth).c_str(), ViewportTrace::FormatFloat(result.viewport.maxDepth).c_str(),
+                            degenerate ? 1 : 0, result.renderExtent.width, result.renderExtent.height,
+                            result.scissor.offset.x, result.scissor.offset.y, result.scissor.extent.width, result.scissor.extent.height);
+        }
+    }
     result.scissor = {{0, 0}, result.renderExtent};
     intersect(result.scissor, cx, 0xc, true);
     intersect(result.scissor, cx, 0x81, false);

@@ -1,4 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawInputTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PushTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineStatsProbe.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
@@ -1039,6 +1044,14 @@ struct DrawInputs {
     std::uint32_t fragmentOutputs = 0;
     VkPipelineStageFlags shaderStages = 0;
     std::uint32_t meshGroups = 0;
+    // Mission 7: the trace's view of this draw's inputs. The id is this module's counter (not a
+    // process-wide one), the flag says the draw is sampled in detail, and the fetches are the
+    // vertex bindings the driver resolved. They are filled only while the trace is enabled.
+    std::uint64_t traceId = 0;
+    bool traceDetail = false;
+    std::vector<DrawInputTrace::VertexFetch> vertexFetches;
+    const char* indexSource = "none";
+    std::uint32_t indexMax = 0;
     std::vector<std::uint32_t> restartTable;
     const VertexInputLayout& VertexLayout() const { return retainedVertexInput != nullptr ? *retainedVertexInput : vertexInput; }
 };
@@ -1053,6 +1066,8 @@ std::shared_ptr<Buffer> zeroVertexBuffer(const Context& context, const ShaderRec
 // stages and the vertex input layout are the recipe's (derived from the same compiled stages)
 // instead of computed.
 DrawInputs prepareDrawInputs(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, DrawOutcome& outcome, DrawTimer& timer, const DrawRecipe* recipe) {
+    // Mission 7: the vertex bindings are traced only while the trace is enabled.
+    const bool trace = DrawInputTrace::Enabled();
     DrawInputs inputs;
     APS5_LOG_OUT_DEBUG("Draw indices=%u instances=%u indexSize=%u flags=%u indexAddress=0x%llx", draw.indexCount, draw.instanceCount, draw.indexSize, draw.flags, static_cast<unsigned long long>(draw.indexAddress));
     APS5_LOG_OUT_DEBUG("State colorTarget=%u render=%ux%u colorAddress=0x%llx colorBytes=%llu colorExtent=%ux%u", state.hasColorTarget ? 1u : 0u, state.renderExtent.width, state.renderExtent.height, static_cast<unsigned long long>(state.color.address), static_cast<unsigned long long>(state.color.bytes), state.color.extent.width, state.color.extent.height);
@@ -1207,6 +1222,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         inputs.indexHandle = indexCopy->Handle();
         inputs.indexOffset = 0;
         inputs.indices = std::move(indexCopy);
+        inputs.indexSource = "quad-list";
     } else if (draw.indexed) {
         const bool listTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         const bool fanGeometry = state.stages.mesh && state.stages.mesh->inputPrimitive == 5;
@@ -1260,9 +1276,11 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.indexHandle = import->buffer;
             inputs.indexOffset = HostImportOffset(*import, draw.indexAddress);
             inputs.inPlaceReads.emplace_back(draw.indexAddress, draw.indexAddress + indexBytes);
+            inputs.indexSource = "import";
         } else {
             inputs.indices = std::move(copy.buffer);
             inputs.indexHandle = inputs.indices->Handle();
+            inputs.indexSource = "copy";
         }
     }
     APS5_LOG_CHARS_OUT_DEBUG("Index validation OK");
@@ -1319,8 +1337,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     const auto plan = PlanVertexCopies(plannedFetches);
     std::vector<VkBuffer> rangeHandles;
     std::vector<VkDeviceSize> rangeOffsets;
+    std::vector<const char*> rangeSources;
     rangeHandles.reserve(plan.copies.size());
     rangeOffsets.reserve(plan.copies.size());
+    rangeSources.reserve(plan.copies.size());
     for (std::size_t range = 0; range < plan.copies.size(); ++range) {
         const auto [begin, end] = plan.copies[range];
         const auto bytes = static_cast<std::size_t>(end - begin);
@@ -1329,6 +1349,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         if (const auto* import = InPlaceDrawInput(context, begin, bytes, plan.alignments[range], &inputs.vertexInputBehindGpuWrite)) {
             rangeHandles.push_back(import->buffer);
             rangeOffsets.push_back(HostImportOffset(*import, begin));
+            rangeSources.push_back("import");
             inputs.inPlaceReads.emplace_back(begin, end);
             continue;
         }
@@ -1336,6 +1357,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         KeepDrawInput(context.recorder, begin, copy, Recorder::SnapshotUse::Vertex, 0);
         rangeHandles.push_back(copy.buffer->Handle());
         rangeOffsets.push_back(0);
+        rangeSources.push_back("copy");
         inputs.vertexBuffers.push_back(std::move(copy.buffer));
     }
     std::vector<VkBuffer> soloHandles(fetches.size(), VK_NULL_HANDLE);
@@ -1351,17 +1373,60 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.vertexHandles.push_back(zeroed[i]->Handle());
             inputs.vertexOffsets[i] = 0;
             inputs.vertexBuffers.push_back(std::move(zeroed[i]));
+            if (trace) {
+                DrawInputTrace::VertexFetch fetch;
+                fetch.address = 0;
+                fetch.bytes = 0;
+                fetch.source = "zeroed";
+                fetch.valid = false;
+                fetch.location = attributes[i].location;
+                fetch.components = attributes[i].components;
+                fetch.format = attributes[i].resource.fields[3] >> 12u & 0x7fu;
+                inputs.vertexFetches.push_back(fetch);
+            }
             continue;
         }
         const auto f = fetchOf[i];
         if (isSolo[f]) {
             inputs.vertexHandles.push_back(soloHandles[f]);
             inputs.vertexOffsets[i] = 0;
+            if (trace) {
+                DrawInputTrace::VertexFetch fetch;
+                fetch.address = fetches[f].begin;
+                fetch.bytes = fetches[f].end - fetches[f].begin;
+                fetch.stride = fetches[f].stride;
+                fetch.records = fetchValid[f];
+                fetch.alignment = fetches[f].alignment;
+                fetch.fetchIndex = fetches[f].fetchIndex;
+                fetch.boundOffset = 0;
+                fetch.location = attributes[i].location;
+                fetch.components = attributes[i].components;
+                fetch.format = attributes[i].resource.fields[3] >> 12u & 0x7fu;
+                fetch.source = "zero-padded";
+                fetch.valid = true;
+                inputs.vertexFetches.push_back(fetch);
+            }
             continue;
         }
         const auto j = plannedOf[f];
         inputs.vertexHandles.push_back(rangeHandles[plan.copyOf[j]]);
         inputs.vertexOffsets[i] = rangeOffsets[plan.copyOf[j]] + plan.offsets[j];
+        if (trace) {
+            DrawInputTrace::VertexFetch fetch;
+            fetch.address = fetches[f].begin;
+            fetch.bytes = fetches[f].end - fetches[f].begin;
+            fetch.stride = fetches[f].stride;
+            fetch.records = fetchValid[f];
+            fetch.alignment = fetches[f].alignment;
+            fetch.fetchIndex = fetches[f].fetchIndex;
+            fetch.boundOffset = inputs.vertexOffsets[i];
+            fetch.location = attributes[i].location;
+            fetch.components = attributes[i].components;
+            fetch.format = attributes[i].resource.fields[3] >> 12u & 0x7fu;
+            fetch.source = rangeSources[plan.copyOf[j]];
+            fetch.valid = true;
+            inputs.vertexFetches.push_back(fetch);
+        }
     }
     timer.phase(PhaseVertex);
     return inputs;
@@ -1490,11 +1555,27 @@ void recordDrawCommands(const Context& context, VkCommandBuffer commands, const 
     if (!inputs.vertexHandles.empty()) context.Resolved(&DeviceFunctions::cmdBindVertexBuffers, "vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(inputs.vertexHandles.size()), inputs.vertexHandles.data(), inputs.vertexOffsets.data());
     if (state.quadList) {
         context.Resolved(&DeviceFunctions::cmdBindIndexBuffer, "vkCmdBindIndexBuffer")(commands, inputs.indexHandle, inputs.indexOffset, VK_INDEX_TYPE_UINT32);
+        if (inputs.traceDetail) {
+            Aps5Diag::Event("draw-vk", "event=vk id=%llu call=vkCmdDrawIndexed vcount=%u inst=%u first_index=%u base_vertex=%d first_inst=%u",
+                            static_cast<unsigned long long>(inputs.traceId),
+                            (draw.indexCount / 4u) * 6u, draw.instanceCount, 0u,
+                            static_cast<int>(draw.firstVertex), draw.firstInstance);
+        }
         context.Resolved(&DeviceFunctions::cmdDrawIndexed, "vkCmdDrawIndexed")(commands, (draw.indexCount / 4u) * 6u, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         return;
     }
     if (draw.indexed) context.Resolved(&DeviceFunctions::cmdBindIndexBuffer, "vkCmdBindIndexBuffer")(commands, inputs.indexHandle, inputs.indexOffset, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     if (args == nullptr) {
+        if (inputs.traceDetail) {
+            if (draw.indexed) {
+                Aps5Diag::Event("draw-vk", "event=vk id=%llu call=vkCmdDrawIndexed vcount=%u inst=%u first_index=%u base_vertex=%d first_inst=%u",
+                                static_cast<unsigned long long>(inputs.traceId), draw.indexCount, draw.instanceCount, firstIndex,
+                                static_cast<int>(draw.firstVertex), draw.firstInstance);
+            } else {
+                Aps5Diag::Event("draw-vk", "event=vk id=%llu call=vkCmdDraw vcount=%u inst=%u first_vertex=%u first_inst=%u",
+                                static_cast<unsigned long long>(inputs.traceId), draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
+            }
+        }
         if (draw.indexed) context.Resolved(&DeviceFunctions::cmdDrawIndexed, "vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, firstIndex, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         else context.Resolved(&DeviceFunctions::cmdDraw, "vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
     } else if (indirect->path == IndirectDrawPath::Gpu) {
@@ -1502,6 +1583,12 @@ void recordDrawCommands(const Context& context, VkCommandBuffer commands, const 
             if (draw.indexed) context.Function<PFN_vkCmdDrawIndexedIndirectCountKHR>("vkCmdDrawIndexedIndirectCountKHR")(commands, argumentBuffer, argumentOffset, indirect->countImport->buffer, HostImportOffset(*indirect->countImport, args->countAddress), args->count, args->stride);
             else context.Function<PFN_vkCmdDrawIndirectCountKHR>("vkCmdDrawIndirectCountKHR")(commands, argumentBuffer, argumentOffset, indirect->countImport->buffer, HostImportOffset(*indirect->countImport, args->countAddress), args->count, args->stride);
         } else if (args->count <= 1 || context.multiDrawIndirect) {
+            if (inputs.traceDetail) {
+                Aps5Diag::Event("draw-vk", "event=vk id=%llu call=%s argbuf_off=%llu count=%u stride=%u",
+                                static_cast<unsigned long long>(inputs.traceId),
+                                draw.indexed ? "vkCmdDrawIndexedIndirect" : "vkCmdDrawIndirect",
+                                static_cast<unsigned long long>(argumentOffset), args->count, args->stride);
+            }
             if (draw.indexed) context.Resolved(&DeviceFunctions::cmdDrawIndexedIndirect, "vkCmdDrawIndexedIndirect")(commands, argumentBuffer, argumentOffset, args->count, args->stride);
             else context.Resolved(&DeviceFunctions::cmdDrawIndirect, "vkCmdDrawIndirect")(commands, argumentBuffer, argumentOffset, args->count, args->stride);
         } else {
@@ -1518,6 +1605,14 @@ void recordDrawCommands(const Context& context, VkCommandBuffer commands, const 
         for (const auto& record : indirect->records) {
             if (record.count == 0 || record.instances == 0) continue;
             const auto firstInstance = args->instanceRule == Rule::InPlace ? record.firstInstance : args->instanceConstant;
+            if (inputs.traceDetail) {
+                Aps5Diag::Event("draw-vk", "event=vk id=%llu call=%s vcount=%u inst=%u first_index=%u base_vertex=%d first_inst=%u",
+                                static_cast<unsigned long long>(inputs.traceId),
+                                draw.indexed ? "vkCmdDrawIndexed" : "vkCmdDraw", record.count, record.instances,
+                                record.firstVertexOrIndex,
+                                static_cast<int>(args->vertexRule == Rule::InPlace ? record.vertexOffset : args->vertexConstant),
+                                firstInstance);
+            }
             if (draw.indexed) {
                 // The CP clamps the index range to INDEX_BUFFER_SIZE (the bound copy).
                 if (record.firstVertexOrIndex >= draw.indexCount) continue;
@@ -1718,6 +1813,8 @@ struct RecordedDraw {
     bool listed = false;
     bool completion = false;
     bool waited = false;
+    // Mission 7: the draw came from the draw cache (a recipe) rather than fresh.
+    bool fromRecipe = false;
     const std::array<std::byte, PipelinePushConstantBytes>* pushBytes = nullptr;
     VkShaderStageFlags pushStages = 0;
     std::vector<std::pair<std::uint32_t, std::shared_ptr<Pipeline>>> stencilReplay;
@@ -1778,6 +1875,47 @@ void pushDrawConstants(const Pipeline& pipeline, VkCommandBuffer commands, const
         stages = PushConstantStages(shaders);
     }
     patchDepthRemapPush(block, state);
+    // Mission 10: the assembled block, the exact bytes and the correlation that links the
+    // stages. A block that came from the draw cache is reported as reused, not assembled.
+    if (PushTrace::Enabled() && !shaders.empty() && shaders.front().program != nullptr) {
+        const auto& program = *shaders.front().program;
+        const auto identity = PushTrace::IdentityText(program.Identity().low, program.Identity().high);
+        const auto length = program.pushConstants.size();
+        if (PushTrace::IsTraced(identity) && length != 0 && shaders.front().pushConstantOffset + length <= block.size()) {
+            std::vector<std::uint8_t> stage(length);
+            std::memcpy(stage.data(), block.data() + shaders.front().pushConstantOffset, length);
+            const auto fingerprint = PushTrace::Fingerprint(stage.data(), stage.size());
+            PushTrace::Sampler::Reason reason = PushTrace::Sampler::Reason::None;
+            if (PushTrace::SamplerInstance().Admit(identity, fingerprint, PushTrace::ElapsedMilliseconds(), reason)) {
+                const auto correlation = PushTrace::Correlator::NextCorrelation();
+                auto& pending = PushTrace::Correlator::Current();
+                pending.active = true;
+                pending.correlation = correlation;
+                pending.identity = identity;
+                pending.offset = shaders.front().pushConstantOffset;
+                pending.bytes = stage;
+                pending.fingerprint = fingerprint;
+                pending.createdMs = PushTrace::ElapsedMilliseconds();
+                const auto& context = PushTrace::CurrentDraw();
+                Aps5Diag::Event("push-trace",
+                                "event=push_%s mono_ns=%llu elapsed_ms=%llu corr=%llu stage=vertex shader=%s target=%llu batch=%llu "
+                                "offset=%u length=%zu hash=%016llx hex=%s words=%s floats=%s reason=%s vertex_count=%u instance_count=%u",
+                                bytes != nullptr ? "reused" : "assembled",
+                                static_cast<unsigned long long>(PushTrace::MonoNanoseconds()),
+                                static_cast<unsigned long long>(pending.createdMs),
+                                static_cast<unsigned long long>(correlation), identity.c_str(),
+                                static_cast<unsigned long long>(context.target), static_cast<unsigned long long>(context.batch),
+                                shaders.front().pushConstantOffset, length,
+                                static_cast<unsigned long long>(fingerprint),
+                                PushTrace::Hex(stage.data(), stage.size()).c_str(),
+                                PushTrace::Words(stage.data(), stage.size()).c_str(),
+                                PushTrace::Floats(stage.data(), stage.size()).c_str(),
+                                reason == PushTrace::Sampler::Reason::First ? "first" :
+                                    (reason == PushTrace::Sampler::Reason::Changed ? "changed" : "bucket"),
+                                draw.indexCount, draw.instanceCount);
+            }
+        }
+    }
     if (state.stages.tessellation) {
         for (const auto& shader : shaders) Require(shader.program->pushConstants.empty() || shader.pushConstantOffset >= PipelinePushSlotBytes || shader.pushConstantOffset + shader.program->pushConstants.size() <= ShaderRecompiler::TessellationLevelPushOffsetBytes, "a stage's push constants overlap the tessellation levels");
         const std::array<float, ShaderRecompiler::TessellationLevelPushBytes / 4> levels{state.stages.minTessellationLevel, state.stages.maxTessellationLevel};
@@ -1885,6 +2023,145 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     auto& resources = *record.resources;
     const auto* args = record.indirect != nullptr ? record.indirect->args : nullptr;
     const bool gpuIndirect = args != nullptr && record.indirect->path == IndirectDrawPath::Gpu;
+    // Mission 7: a GPU pipeline-statistics query around the draws whose result the target
+    // readback captures, so the counters and the pixels describe the same work.
+    int querySlot = -1;
+    std::uint64_t queryTarget = 0;
+    if (PipelineStatsProbe::Enabled()) {
+        queryTarget = record.targets.empty() || record.targets.front() == nullptr ? 0 : record.targets.front()->Id();
+        if (queryTarget != 0) {
+            const auto elapsed = static_cast<double>(Aps5Diag::ElapsedMicros()) / 1000000.0;
+            if (TargetCapture::Schedule::Get().ShouldCapture(queryTarget, elapsed)) {
+                auto& pool = PipelineStatsProbe::Pool::Get();
+                if (pool.Ensure(context, context.geometryShader)) {
+                    querySlot = pool.Reserve();
+                    if (querySlot < 0) PipelineStatsProbe::QueriesSkipped().fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+    // Mission 7: the draw's own inputs. The counters cover every draw; the detailed records
+    // cover a bounded sample of them.
+    if (DrawInputTrace::Enabled()) {
+        auto& counters = DrawInputTrace::Stats();
+        counters.draws.fetch_add(1, std::memory_order_relaxed);
+        if (draw.indexed) counters.indexed.fetch_add(1, std::memory_order_relaxed);
+        else counters.direct.fetch_add(1, std::memory_order_relaxed);
+        if (args != nullptr) counters.indirect.fetch_add(1, std::memory_order_relaxed);
+        if (state.stages.mesh) counters.mesh.fetch_add(1, std::memory_order_relaxed);
+        if (record.fromRecipe) counters.recipeDraws.fetch_add(1, std::memory_order_relaxed);
+        else counters.freshDraws.fetch_add(1, std::memory_order_relaxed);
+        if (draw.indexCount == 0) counters.zeroIndexCount.fetch_add(1, std::memory_order_relaxed);
+        if (draw.instanceCount == 0) counters.zeroInstanceCount.fetch_add(1, std::memory_order_relaxed);
+        if (!draw.indexed && draw.indexCount == 0) counters.zeroVertexCount.fetch_add(1, std::memory_order_relaxed);
+        if (inputs.vertexHandles.empty()) counters.noVertexBuffer.fetch_add(1, std::memory_order_relaxed);
+        // Mission 9: the guest program's declared vertex attributes against the buffers the
+        // driver bound. A draw with no declared attribute needs no vertex buffer; a draw that
+        // declares one and binds none is a different thing.
+        const auto declared = shaders.empty() ? 0u : static_cast<std::uint32_t>(shaders.front().program->vertexAttributes.size());
+        counters.vertexAttributeCount.fetch_add(declared, std::memory_order_relaxed);
+        if (declared == 0) counters.noVertexAttributes.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& fetch : inputs.vertexFetches) {
+            if (std::strcmp(fetch.source, "zeroed") == 0) counters.zeroedVertexBuffer.fetch_add(1, std::memory_order_relaxed);
+            if (!fetch.valid) counters.invalidVertexFetch.fetch_add(1, std::memory_order_relaxed);
+        }
+        counters.vertexCountSum.fetch_add(draw.indexCount, std::memory_order_relaxed);
+        counters.indexCountSum.fetch_add(draw.indexCount, std::memory_order_relaxed);
+        counters.instanceCountSum.fetch_add(draw.instanceCount, std::memory_order_relaxed);
+        for (const auto& entry : { std::pair<std::atomic<std::uint64_t>*, std::uint64_t>{&counters.maxVertexCount, draw.indexCount},
+                                   std::pair<std::atomic<std::uint64_t>*, std::uint64_t>{&counters.maxIndexCount, draw.indexCount},
+                                   std::pair<std::atomic<std::uint64_t>*, std::uint64_t>{&counters.maxInstanceCount, draw.instanceCount} }) {
+            auto seen = entry.first->load(std::memory_order_relaxed);
+            while (entry.second > seen && !entry.first->compare_exchange_weak(seen, entry.second, std::memory_order_relaxed)) {
+            }
+        }
+        DrawInputTrace::DrawIdentity identity;
+        identity.id = DrawInputTrace::NextId();
+        identity.batch = recorder != nullptr ? recorder->OpenSerial() : 0;
+        identity.target = record.targets.empty() || record.targets.front() == nullptr ? 0 : record.targets.front()->Id();
+        identity.recipe = record.fromRecipe;
+        if (!state.colors.empty()) {
+            identity.targetWidth = state.colors.front().extent.width;
+            identity.targetHeight = state.colors.front().extent.height;
+        }
+        const bool suspicious = draw.indexCount == 0 || draw.instanceCount == 0 || inputs.vertexHandles.empty() ||
+                                std::any_of(inputs.vertexFetches.begin(), inputs.vertexFetches.end(),
+                                            [](const DrawInputTrace::VertexFetch& fetch) { return !fetch.valid; });
+        inputs.traceId = identity.id;
+        inputs.traceDetail = DrawInputTrace::Sampler().Admit(identity.target, suspicious);
+
+        if (inputs.traceDetail) {
+            const char* type = args != nullptr ? "indirect" : (state.quadList ? "quad" : (state.stages.mesh ? "mesh" : (draw.indexed ? "indexed" : "direct")));
+            Aps5Diag::Event("draw-input",
+                            "event=draw id=%llu batch=%llu target=%llu tw=%u th=%u type=%s recipe=%d reason=%s "
+                            "vcount=%u icount=%u inst=%u first_v=%u first_i=%u base_v=%u first_inst=%u "
+                            "index_size=%u max_index=%u indirect_count=%u indirect_stride=%u topo=%d quad=%d rect=%d mesh=%d",
+                            static_cast<unsigned long long>(identity.id),
+                            static_cast<unsigned long long>(identity.batch),
+                            static_cast<unsigned long long>(identity.target), identity.targetWidth, identity.targetHeight,
+                            type, identity.recipe ? 1 : 0, DrawInputTrace::Sampler().ReasonName(),
+                            draw.indexCount, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance,
+                            static_cast<int>(draw.firstVertex), draw.firstInstance, draw.indexSize, inputs.maxIndex,
+                            args != nullptr ? args->count : 0u, args != nullptr ? args->stride : 0u,
+                            static_cast<int>(state.topology), state.quadList ? 1 : 0, state.rectList ? 1 : 0, state.stages.mesh ? 1 : 0);
+            // Mission 8: the viewport's width and height are floats. Mission 7 passed them to
+            // %u, which read the wrong argument slot and printed them as zero; they are
+            // printed as floats now, with their raw bits.
+            Aps5Diag::Event("draw-state",
+                            "event=state id=%llu vw=%.9g vh=%.9g vx=%.9g vy=%.9g vwbits=0x%08x vhbits=0x%08x "
+                            "scissor=%u,%u,%u,%u cull=%u front=%u "
+                            "samples=%u dtest=%d dwrite=%d dcompare=%u stencil=%d blend=%u wmask=0x%x has_depth=%d",
+                            static_cast<unsigned long long>(identity.id),
+                            static_cast<double>(state.viewport.width), static_cast<double>(state.viewport.height),
+                            static_cast<double>(state.viewport.x), static_cast<double>(state.viewport.y),
+                            ViewportTrace::Bits(state.viewport.width), ViewportTrace::Bits(state.viewport.height),
+                            state.scissor.offset.x, state.scissor.offset.y, state.scissor.extent.width, state.scissor.extent.height,
+                            static_cast<unsigned>(state.cullMode), static_cast<unsigned>(state.frontFace),
+                            state.samples, state.depthTest ? 1 : 0, state.depthWrite ? 1 : 0,
+                            static_cast<unsigned>(state.depthCompare), state.stencilTest ? 1 : 0,
+                            state.blends.empty() ? 0u : (state.blends.front().blendEnable ? 1u : 0u),
+                            state.blends.empty() ? 0u : state.blends.front().colorWriteMask,
+                            state.depth.has_value() ? 1 : 0);
+            // Mission 9: the vertex program the draw used: its pipeline identity (the SPIR-V
+            // content hash the pipeline store keys on), the attributes its guest program
+            // declares, and the push block it carries.
+            if (!shaders.empty() && shaders.front().program != nullptr) {
+                const auto& program = *shaders.front().program;
+                const auto programIdentity = program.Identity();
+                Aps5Diag::Event("draw-shader",
+                                "event=shader id=%llu batch=%llu target=%llu stage=vertex identity=%016llx%016llx variant=%llu "
+                                "attributes=%u vertex_inputs=%u push_bytes=%zu remap_mode=%u remap_scale=%.6g remap_offset=%.6g",
+                                static_cast<unsigned long long>(identity.id),
+                                static_cast<unsigned long long>(identity.batch),
+                                static_cast<unsigned long long>(identity.target),
+                                static_cast<unsigned long long>(programIdentity.low), static_cast<unsigned long long>(programIdentity.high),
+                                static_cast<unsigned long long>(program.PipelineVariantId()),
+                                program.vertexAttributes.size(), program.vertexInputs.size(), program.pushConstants.size(),
+                                state.depthRemap.mode, static_cast<double>(state.depthRemap.scale), static_cast<double>(state.depthRemap.offset));
+            }
+            for (std::size_t index = 0; index < inputs.vertexFetches.size(); ++index) {
+                const auto& fetch = inputs.vertexFetches[index];
+                Aps5Diag::Event("draw-buffer",
+                                "event=vbuf id=%llu n=%zu src=%s addr=0x%llx bytes=%llu bound_off=%llu stride=%u recs=%u align=%u fetch=%u valid=%d "
+                                "location=%u components=%u format=%u",
+                                static_cast<unsigned long long>(identity.id), index, fetch.source,
+                                static_cast<unsigned long long>(fetch.address),
+                                static_cast<unsigned long long>(fetch.bytes),
+                                static_cast<unsigned long long>(fetch.boundOffset), fetch.stride, fetch.records,
+                                fetch.alignment, fetch.fetchIndex, fetch.valid ? 1 : 0,
+                                fetch.location, fetch.components, fetch.format);
+            }
+            Aps5Diag::Event("draw-buffer",
+                            "event=ibuf id=%llu src=%s addr=0x%llx bytes=%llu bound_off=%llu type=%s count=%u max_index=%u",
+                            static_cast<unsigned long long>(identity.id), inputs.indexSource,
+                            static_cast<unsigned long long>(draw.indexAddress),
+                            static_cast<unsigned long long>(inputs.indexBytes),
+                            static_cast<unsigned long long>(inputs.indexOffset),
+                            draw.indexSize == 2 ? "uint16" : (draw.indexSize == 4 ? "uint32" : "none"),
+                            draw.indexCount, inputs.maxIndex);
+        }
+        DrawInputTrace::ReportAggregate(record.fromRecipe ? "recipe" : "fresh");
+    }
     using CommandClass = Recorder::CommandClass;
     const auto countBarrier = [&](std::uint32_t count) { Recorder::CountBarriers(CommandClass::Draw, count); };
     // The pass is named by its attachment views (stable while the kept targets live, so unique
@@ -2006,8 +2283,47 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, record.pipeline->Layout());
     }
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
+    // Mission 10: the draw the push block belongs to, and the draw that consumes it.
+    if (PushTrace::Enabled()) {
+        auto& context = PushTrace::CurrentDraw();
+        context.target = record.targets.empty() || record.targets.front() == nullptr ? 0 : record.targets.front()->Id();
+        context.batch = recorder->OpenSerial();
+        context.vertexCount = draw.indexCount;
+        context.instanceCount = draw.instanceCount;
+    }
     pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty());
+    if (PushTrace::Enabled()) {
+        auto& pending = PushTrace::Correlator::Current();
+        if (pending.active) {
+            const auto& context = PushTrace::CurrentDraw();
+            Aps5Diag::Event("push-trace",
+                            "event=push_draw mono_ns=%llu elapsed_ms=%llu corr=%llu shader=%s target=%llu batch=%llu "
+                            "vertex_count=%u instance_count=%u uploaded=%d",
+                            static_cast<unsigned long long>(PushTrace::MonoNanoseconds()),
+                            static_cast<unsigned long long>(PushTrace::ElapsedMilliseconds()),
+                            static_cast<unsigned long long>(pending.correlation), pending.identity.c_str(),
+                            static_cast<unsigned long long>(context.target), static_cast<unsigned long long>(context.batch),
+                            context.vertexCount, context.instanceCount, pending.uploaded ? 1 : 0);
+            if (!pending.uploaded) {
+                Aps5Diag::Failure("push-trace", "event=push_unmatched stage=draw corr=%llu reason=no-upload",
+                                   static_cast<unsigned long long>(pending.correlation));
+            }
+            pending.active = false;
+        }
+    }
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
+    // Mission 7: the pipeline-statistics query brackets the draw's commands inside the render
+    // pass instance, so it measures this draw and not the pass's other work.
+    if (querySlot >= 0) {
+        // Mission 8: the explicit reset is gone. Mission 7 recorded it inside the render pass,
+        // which is where the query never produced a result. A query that is not active is reset
+        // by beginning it, so the reset is unnecessary; the slot is free when it is reserved
+        // and the pool is only used by this probe.
+        auto& pool = PipelineStatsProbe::Pool::Get();
+        context.Function<PFN_vkCmdBeginQuery>("vkCmdBeginQuery")(commands, pool.Handle(), static_cast<std::uint32_t>(querySlot),
+                                                                PipelineStatsProbe::Flags(context.geometryShader));
+        PipelineStatsProbe::NoteBegin(querySlot, Aps5Diag::ElapsedMicros());
+    }
     if (record.stencilReplay.empty()) recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     else {
         recordStencilReplay(context, commands, state, draw, inputs, record.stencilReplay, shaders, resources, record.pushBytes, record.pushStages);
@@ -2020,6 +2336,63 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     if (record.pipeline->SplitsSecondChannel()) {
         record.pipeline->ContinueSecondChannel(commands);
         recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
+    }
+    if (querySlot >= 0) {
+        auto& pool = PipelineStatsProbe::Pool::Get();
+        context.Function<PFN_vkCmdEndQuery>("vkCmdEndQuery")(commands, pool.Handle(), static_cast<std::uint32_t>(querySlot));
+        const auto device = context.device;
+        const auto handle = pool.Handle();
+        const auto slot = static_cast<std::uint32_t>(querySlot);
+        const auto drawId = inputs.traceId;
+        const auto targetId = queryTarget;
+        const auto getResults = context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults");
+        const auto batch = recorder->OpenSerial();
+        const auto begin = PipelineStatsProbe::BeginTime(static_cast<int>(querySlot));
+        const auto ended = Aps5Diag::ElapsedMicros();
+        PipelineStatsProbe::QueriesTaken().fetch_add(1, std::memory_order_relaxed);
+        // The counters are read after the batch's fence has signalled: the query never waits.
+        recorder->OnComplete([device, handle, slot, drawId, targetId, getResults, batch, ended, begin]() {
+            std::uint64_t values[PipelineStatsProbe::CounterCount] = {};
+            // The result is read without waiting. A waiting read on a query whose counters the
+            // device cannot produce never returns, and it held the completion worker (and with
+            // it the graphics thread) in Mission 8's first run.
+            const auto status = getResults(
+                device, handle, slot, PipelineStatsProbe::CounterCount, sizeof(values), values, sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT);
+            const auto retrieved = Aps5Diag::ElapsedMicros();
+            if (status != VK_SUCCESS) {
+                Aps5Diag::Failure("pipeline-stats",
+                                   "event=result-state id=%llu target=%llu batch=%llu state=NOT_READY status=%d "
+                                   "begin_us=%llu end_us=%llu retrieve_us=%llu slot_valid=1",
+                                   static_cast<unsigned long long>(drawId), static_cast<unsigned long long>(targetId),
+                                   static_cast<unsigned long long>(batch), static_cast<int>(status),
+                                   static_cast<unsigned long long>(begin), static_cast<unsigned long long>(ended),
+                                   static_cast<unsigned long long>(retrieved));
+                PipelineStatsProbe::Pool::Get().Release(static_cast<int>(slot));
+                return;
+            }
+            if (status != VK_SUCCESS) {
+                Aps5Diag::Failure("pipeline-stats", "event=query-failed id=%llu target=%llu status=%d",
+                                   static_cast<unsigned long long>(drawId), static_cast<unsigned long long>(targetId), static_cast<int>(status));
+            } else {
+                Aps5Diag::Event("pipeline-stats", "event=counters id=%llu target=%llu batch=%llu state=VALID "
+                                "begin_us=%llu end_us=%llu retrieve_us=%llu "
+                                "%s=%llu %s=%llu %s=%llu %s=%llu %s=%llu %s=%llu %s=%llu %s=%llu",
+                                static_cast<unsigned long long>(drawId), static_cast<unsigned long long>(targetId),
+                                static_cast<unsigned long long>(batch),
+                                static_cast<unsigned long long>(begin), static_cast<unsigned long long>(ended),
+                                static_cast<unsigned long long>(retrieved),
+                                PipelineStatsProbe::CounterName(0), static_cast<unsigned long long>(values[0]),
+                                PipelineStatsProbe::CounterName(1), static_cast<unsigned long long>(values[1]),
+                                PipelineStatsProbe::CounterName(2), static_cast<unsigned long long>(values[2]),
+                                PipelineStatsProbe::CounterName(3), static_cast<unsigned long long>(values[3]),
+                                PipelineStatsProbe::CounterName(4), static_cast<unsigned long long>(values[4]),
+                                PipelineStatsProbe::CounterName(5), static_cast<unsigned long long>(values[5]),
+                                PipelineStatsProbe::CounterName(6), static_cast<unsigned long long>(values[6]),
+                                PipelineStatsProbe::CounterName(7), static_cast<unsigned long long>(values[7]));
+            }
+            PipelineStatsProbe::Pool::Get().Release(static_cast<int>(slot));
+        });
     }
     if (meshArguments != nullptr) recorder->Keep(meshArguments);
     if (args != nullptr) CountIndirectDraw(record.indirect->path, record.indirect->readMs, rewritten);
@@ -2122,7 +2495,14 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     // draws, their inputs: per-draw string building at ~1400 draws per 10 s is itself a cost the
     // totals must not carry.
     static const bool traceDraws = std::getenv("APS5_TRACE_DRAWS") != nullptr;
+    // Mission 4: APS5_DIAG_DRAW adds one bounded correlation record per recorded draw on the
+    // diagnostic channel (draw id, recorder batch, resource key fingerprint, resolved target).
+    static const bool diagDraws = Aps5Diag::Enabled("APS5_DIAG_DRAW");
     DrawOutcome outcome;
+    // Mission 4/5/6: the draw's monotonic id, shared by the per-draw correlation record
+    // and by the bounded target capture so both refer to the same draw.
+    static std::uint64_t drawId = 0;
+    const auto id = ++drawId;
     const ShaderResources::BuildTiming* built = nullptr;
     // The thread's GPU waits so far: the difference at the report, less the draw's own syncs
     // (`ownWaitedMs`, sampled around them), is what this draw waited for through the flush hook
@@ -2465,6 +2845,229 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         record.waited = outcome.waited;
         record.stencilReplay = stencilReplay;
         recordDraw(context, state, draw, shaders, inputs, record, outcome, timer, ownWaitedMs);
+        // Mission 6: bounded, read-only capture of the target this draw just rendered into.
+        // The copy is recorded into the SAME batch as the draw, after the render pass the draw
+        // left open, so it observes the target exactly as the draw left it, and the bytes are
+        // read only after that batch's fence has signalled. The draw stays recorded and
+        // asynchronous, the target stays resident, and the draw-cache recipe path stays enabled.
+        if (recorder != nullptr) {
+            auto& schedule = TargetCapture::Schedule::Get();
+            if (schedule.Enabled()) {
+                // Mission 7: the due targets are taken in ascending size, so a smaller target
+                // that the title also draws into is captured before the full-size one, and only
+                // the per-time budget is taken at each scheduled time.
+                const auto elapsed = static_cast<double>(Aps5Diag::ElapsedMicros()) / 1000000.0;
+                std::vector<TargetBinding*> due;
+                for (auto& binding : targets) {
+                    if (binding.resident == nullptr) continue;
+                    if (!schedule.ShouldCapture(binding.resident->Id(), elapsed)) continue;
+                    due.push_back(&binding);
+                }
+                std::sort(due.begin(), due.end(), [](const TargetBinding* left, const TargetBinding* right) {
+                    const auto leftPixels = static_cast<std::uint64_t>(left->color.extent.width) * left->color.extent.height;
+                    const auto rightPixels = static_cast<std::uint64_t>(right->color.extent.width) * right->color.extent.height;
+                    if (leftPixels != rightPixels) return leftPixels < rightPixels;
+                    return left->resident->Id() < right->resident->Id();
+                });
+                std::size_t taken = 0;
+                for (auto* binding : due) {
+                    if (taken >= TargetCapture::PerTimeLimit()) break;
+                    ++taken;
+                    const auto targetId = binding->resident->Id();
+                    const auto vkFormat = binding->resident->StorageFormat();
+                    std::uint32_t bytesPerPixel = 0;
+                    switch (vkFormat) {
+                    case VK_FORMAT_R8G8B8A8_UNORM:
+                    case VK_FORMAT_B8G8R8A8_UNORM:
+                    case VK_FORMAT_R8G8B8A8_SRGB:
+                    case VK_FORMAT_B8G8R8A8_SRGB:
+                    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+                        bytesPerPixel = 4;
+                        break;
+                    case VK_FORMAT_R16G16B16A16_UNORM:
+                    case VK_FORMAT_R16G16B16A16_SFLOAT:
+                        bytesPerPixel = 8;
+                        break;
+                    default:
+                        break;
+                    }
+                    if (bytesPerPixel == 0) {
+                        Aps5Diag::Failure("target-capture", "event=skipped reason=unsupported-format target=%llu format=%u",
+                                           static_cast<unsigned long long>(targetId), static_cast<unsigned>(vkFormat));
+                        continue;
+                    }
+                    const auto width = binding->color.extent.width;
+                    const auto height = binding->color.extent.height;
+                    // Mission 9: the capture can take a bounded region of the target instead of
+                    // the whole surface. The region is clamped to the target, and the copy is a
+                    // partial image-to-buffer copy with the matching row length.
+                    const auto region = TargetCapture::CaptureRegion(width, height, std::getenv("APS5_DIAG_TARGET_REGION"),
+                                                                     static_cast<std::uint32_t>(Aps5Diag::EnvLimit("APS5_DIAG_TARGET_REGION_SIZE", 0)));
+                    if (region.Empty()) {
+                        Aps5Diag::Failure("target-capture", "event=skipped reason=empty-region target=%llu width=%u height=%u",
+                                           static_cast<unsigned long long>(targetId), width, height);
+                        continue;
+                    }
+                    const auto bytes = static_cast<std::size_t>(region.Pixels()) * bytesPerPixel;
+                    if (bytes == 0 || bytes > (256ull << 20)) {
+                        Aps5Diag::Failure("target-capture", "event=skipped reason=size target=%llu bytes=%zu",
+                                           static_cast<unsigned long long>(targetId), bytes);
+                        continue;
+                    }
+                    // Mission 7: a target larger than the pixel limit is not captured, and the
+                    // skip is reported.
+                    const auto pixels = static_cast<std::uint64_t>(width) * height;
+                    const auto maxPixels = TargetCapture::MaxPixels();
+                    if (!TargetCapture::WithinPixelLimit(width, height, maxPixels)) {
+                        Aps5Diag::Failure("target-capture", "event=skipped reason=too-large target=%llu width=%u height=%u pixels=%llu limit=%llu",
+                                           static_cast<unsigned long long>(targetId), width, height,
+                                           static_cast<unsigned long long>(pixels),
+                                           static_cast<unsigned long long>(maxPixels));
+                        continue;
+                    }
+                    // A copy cannot run inside a render pass, so the pass the draw left open ends
+                    // here; its trailing barrier leaves the resident target in GENERAL.
+                    recorder->EndOpenRenderPass();
+                    const auto commands = recorder->Commands();
+                    auto capture = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                    imageBarrier(context, commands, binding->resident->Image(), VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                 VK_ACCESS_TRANSFER_READ_BIT);
+                    VkBufferImageCopy copy{};
+                    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    copy.imageOffset = {region.x, region.y, 0};
+                    copy.imageExtent = {region.width, region.height, 1};
+                    copy.bufferRowLength = region.width;
+                    copy.bufferImageHeight = region.height;
+                    context.Resolved(&DeviceFunctions::cmdCopyImageToBuffer, "vkCmdCopyImageToBuffer")(
+                        commands, binding->resident->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture->Handle(), 1, &copy);
+                    imageBarrier(context, commands, binding->resident->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_GENERAL,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_ACCESS_TRANSFER_READ_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                    VkMemoryBarrier toHost{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(
+                        commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+                    Recorder::CountBarriers(Recorder::CommandClass::Draw, 3);
+                    TargetCapture::Request request;
+                    request.targetId = targetId;
+                    request.drawId = id;
+                    request.batch = recorder->OpenSerial();
+                    // Mission 9: the file describes the region that was captured, not the whole
+                    // target, so the payload and the header agree.
+                    request.width = region.width;
+                    request.height = region.height;
+                    request.guestFormat = binding->resident->Descriptor().format;
+                    request.vkFormat = static_cast<std::uint32_t>(vkFormat);
+                    request.bytesPerPixel = bytesPerPixel;
+                    request.requestedAt = elapsed;
+                    request.regionX = region.x;
+                    request.regionY = region.y;
+                    request.regionWidth = region.width;
+                    request.regionHeight = region.height;
+                    const auto name = "target_" + std::to_string(targetId) + "_" + std::to_string(schedule.Captures()) +
+                                      "_r" + std::to_string(region.x) + "_" + std::to_string(region.y) + "_" +
+                                      std::to_string(region.width) + "x" + std::to_string(region.height) + ".raw";
+                    recorder->OnComplete([capture, request, name]() {
+                        const auto data = capture->Bytes();
+                        TargetCapture::WriteFile(name, request, reinterpret_cast<const unsigned char*>(data.data()), data.size());
+                        Aps5Diag::Event("target-capture", "event=captured target=%llu draw=%llu batch=%llu width=%u height=%u format=%u bytes=%zu name=%s region=%u,%u,%ux%u",
+                                         static_cast<unsigned long long>(request.targetId),
+                                         static_cast<unsigned long long>(request.drawId),
+                                         static_cast<unsigned long long>(request.batch), request.width, request.height,
+                                         request.vkFormat, data.size(), name.c_str(),
+                                         request.regionX, request.regionY, request.regionWidth, request.regionHeight);
+                        const auto first = reinterpret_cast<const unsigned char*>(data.data());
+                        Aps5Diag::Event("target-capture", "event=captured-pixels target=%llu name=%s bytes=%zu first4=%02x%02x%02x%02x",
+                                         static_cast<unsigned long long>(request.targetId), name.c_str(), data.size(),
+                                         data.size() > 3 ? first[0] : 0u, data.size() > 3 ? first[1] : 0u,
+                                         data.size() > 3 ? first[2] : 0u, data.size() > 3 ? first[3] : 0u);
+                    });
+                    schedule.MarkCaptured(targetId);
+                    Aps5Diag::Event("target-capture", "event=scheduled target=%llu draw=%llu batch=%llu width=%u height=%u format=%u bytes=%zu layers=%u mips=%u at=%.3f "
+                                                     "region=%u,%u,%ux%u full=%ux%u",
+                                     static_cast<unsigned long long>(targetId), static_cast<unsigned long long>(id),
+                                     static_cast<unsigned long long>(recorder->OpenSerial()), width, height,
+                                     request.vkFormat, bytes, binding->resident->Descriptor().depthOrLastArray,
+                                     binding->resident->Descriptor().mipCount, elapsed,
+                                     region.x, region.y, region.width, region.height, width, height);
+                    // Mission 21: the sampled ranges of the very draw whose target is captured, so
+                    // the black pixels are correlated with exactly what that draw read. Opt-in:
+                    // Describe() samples every bound range on the CPU, which is not safe to
+                    // run on every captured draw.
+                    if (Aps5Diag::Enabled("APS5_DIAG_DRAW_INPUTS"))
+                    Aps5Diag::Event("draw-inputs", "id=%llu target=0x%llx extent=%ux%u planned=%u nulls=%u %s",
+                                    static_cast<unsigned long long>(id),
+                                    static_cast<unsigned long long>(binding->color.address),
+                                    binding->color.extent.width, binding->color.extent.height,
+                                    resources->PlannedSampledImages(), resources->NullImageDescriptors(),
+                                    resources->Describe().c_str());
+                }
+            }
+        }
+        // Mission 4: bounded draw correlation record (opt-in). It ties the draw to the recorder
+        // batch it was recorded into, to the graphics resource key that selects the cached
+        // resources, and to the resolved colour target. The volume is bounded by the
+        // diagnostic channel's event and byte caps.
+        // A draw with no colour target (a targetless pass) has no target to describe:
+        // the record is skipped for it rather than reading an empty vector's front.
+        if (diagDraws && !targets.empty()) {
+            std::uint64_t fingerprint = 14695981039346656037ull;
+            for (const auto word : contentKey) {
+                fingerprint ^= word;
+                fingerprint *= 1099511628211ull;
+            }
+            const auto& binding = targets.front();
+            // Mission 5: the target's stable identity and the colour-write state that
+            // constrains whether this draw could have written colour at all.
+            char masks[96] = {0};
+            char blends[48] = {0};
+            std::size_t maskLength = 0;
+            std::size_t blendLength = 0;
+            const std::size_t attachments = std::min(state.blends.size(), state.colors.size());
+            for (std::size_t index = 0; index < attachments && index < 4; ++index) {
+                const int written = std::snprintf(masks + maskLength, sizeof(masks) - maskLength,
+                                                  "%s0x%x", index == 0 ? "" : ",", state.blends[index].colorWriteMask);
+                const int blended = std::snprintf(blends + blendLength, sizeof(blends) - blendLength,
+                                                  "%s%d", index == 0 ? "" : ",", state.blends[index].blendEnable ? 1 : 0);
+                if (written > 0) maskLength += static_cast<std::size_t>(written);
+                if (blended > 0) blendLength += static_cast<std::size_t>(blended);
+            }
+            Aps5Diag::Event("draw", "id=%llu batch=%llu key=%016llx target=0x%llx tgt_id=%llu fmt=%u extent=%ux%u resident=%p lookups=%llu full=%llu partial=%llu pages=%llu recorded=%d attachments=%zu write_mask=%s blend=%s clear=0x%08x",
+                            static_cast<unsigned long long>(id),
+                            static_cast<unsigned long long>(recorder != nullptr ? recorder->OpenSerial() : 0),
+                            static_cast<unsigned long long>(fingerprint),
+                            static_cast<unsigned long long>(binding.color.address),
+                            static_cast<unsigned long long>(binding.resident != nullptr ? binding.resident->Id() : 0),
+                            static_cast<unsigned>(binding.color.format), binding.color.extent.width,
+                            binding.color.extent.height, static_cast<const void*>(binding.resident.get()),
+                            static_cast<unsigned long long>(outcome.targetLookups),
+                            static_cast<unsigned long long>(outcome.fullScissorLookups),
+                            static_cast<unsigned long long>(outcome.partialLookups),
+                            static_cast<unsigned long long>(outcome.pagesWalked),
+                            static_cast<int>(outcome.recorded), attachments, masks, blends,
+                            static_cast<unsigned>(binding.color.clearWords[0]));
+            // Mission 21: the draw's own sampled ranges with their content and DCC claim, so the
+            // black frame can be correlated with the surface it read. Bounded: the first few
+            // recorded draws only (the description samples every bound range on the CPU).
+            {
+                static std::atomic<std::uint64_t> described{0};
+                if (Aps5Diag::Enabled("APS5_DIAG_DRAW_INPUTS") && described.fetch_add(1) < 4) {
+                    Aps5Diag::Event("draw-inputs", "id=%llu target=0x%llx extent=%ux%u %s",
+                                    static_cast<unsigned long long>(id),
+                                    static_cast<unsigned long long>(binding.color.address),
+                                    binding.color.extent.width, binding.color.extent.height,
+                                    resources->Describe().c_str());
+                }
+            }
+        }
         // The recipe for the caller's draw-cache entry (design_cpu_final M8, rule R3 for draws):
         // only a template the resource cache serves under this content key (reusable: no lease,
         // no copied writes, every direct region import- or mirror-served) of a direct draw, so a
@@ -2854,6 +3457,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     record.framebuffer = std::move(framebuffer);
     record.targetViews = recipe.targetViews;
     record.targets = std::move(targets);
+    record.fromRecipe = true;
     for (const auto& color : state.colors) record.targetSlices.push_back(color.arraySlice);
     record.pushBytes = &recipe.pushBytes;
     record.pushStages = recipe.pushStages;

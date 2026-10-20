@@ -397,6 +397,11 @@ struct GuardedRange {
     std::uint64_t address;
     std::uint64_t bytes;
     std::uint32_t samples;
+    // The guest's single-sample surface for the same target (0 when it has none) and the
+    // multisample footprint's own extent, so a read of the surface can be told apart from
+    // a read of the samples.
+    std::uint64_t surfaceAddress = 0;
+    std::uint64_t surfaceBytes = 0;
     std::shared_ptr<std::atomic<bool>> active;
     std::shared_ptr<std::atomic<bool>> metadataValid;
 };
@@ -425,7 +430,7 @@ std::atomic<bool>& anyGuarded() {
 }
 
 void guardReads(std::uint64_t address, std::size_t bytes) {
-    RequireNoMultisampleTarget(address, bytes, "a CPU read");
+    PrepareMultisampleTargetRead(address, bytes, "a CPU read");
 }
 
 void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
@@ -453,10 +458,14 @@ void guard(const Context& context, const ColorTarget& target, const std::shared_
         bytes = align(target.extent.width, blockWidth) * align(target.extent.height, blockHeight) * target.elementBytes * target.samples;
     }
     std::unique_lock lock(guardedMutex());
-    guarded().push_back({context.device, target.address, bytes, target.samples, active});
+    guarded().push_back({context.device, target.address, bytes, target.samples, target.surfaceAddress, target.bytes, active, metadataValid});
+    if (!guarded().empty() && guarded().back().address == target.address) {
+        guarded().back().surfaceAddress = target.surfaceAddress;
+        guarded().back().surfaceBytes = target.bytes;
+    }
     if (target.dccAddress != 0) {
-        guarded().push_back({context.device, target.dccAddress, MultisampledDccBytes(target), target.samples, active, metadataValid});
-        if (target.cmaskAddress != 0) guarded().push_back({context.device, target.cmaskAddress, target.cmaskBytes, target.samples, active, metadataValid});
+        guarded().push_back({context.device, target.dccAddress, MultisampledDccBytes(target), target.samples, 0, 0, active, metadataValid});
+        if (target.cmaskAddress != 0) guarded().push_back({context.device, target.cmaskAddress, target.cmaskBytes, target.samples, 0, 0, active, metadataValid});
     }
     anyGuarded().store(true, std::memory_order_release);
     InstallResidentImageReadGuard_nid_no_patch();
@@ -813,6 +822,14 @@ void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget
     acquire(context, target);
 }
 
+bool MultisampleTargetCovers(const Context& context, std::uint64_t address) {
+    std::lock_guard lock(targetsMutex());
+    discardRetiredTargets();
+    return std::any_of(targets().begin(), targets().end(), [&](const auto& target) {
+        return target->active->load(std::memory_order_acquire) && target->context.device == context.device && target->target.surfaceAddress == address;
+    });
+}
+
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource) {
     std::lock_guard lock(targetsMutex());
     discardRetiredTargets();
@@ -822,7 +839,11 @@ VkImageView MultisampleTargetStorageView(const Context& context, const GuestText
         if (!target->active->load(std::memory_order_acquire)) continue;
         if (target->context.device != context.device || target->target.surfaceAddress != resource.baseAddress) continue;
         const auto& rendered = target->target;
-        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.samples == resource.samples && rendered.mip == 0) return target->Storage(StorageFormatForGuest(context, resource.format));
+                // The target's storage view is a single-sample copy of its content, so a descriptor that
+        // names the same address with a different sample count still addresses that copy: the
+        // title's multisample target and its single-sample surface share the address it gave
+        // them, and the write lands in the copy the target keeps.
+        if (rendered.format == format && rendered.extent.width == resource.width && rendered.extent.height == resource.height && rendered.mip == 0) return target->Storage(StorageFormatForGuest(context, resource.format));
         other = target.get();
     }
     if (other == nullptr) {
@@ -905,14 +926,86 @@ void ClearMultisampleTargets(VkDevice device) {
     UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
+namespace {
+char guarded_detail[256]{};
+}
+
+// Mission 21: a guest read that overlaps a multisampled color target. The target's samples live
+// only on the host, so the read is served by resolving the target into its own single-sample
+// surface first; the guest then reads the picture the resolve produced, which is what the
+// console's read of the same surface returns. A read that reaches past the surface into the
+// sample footprint still cannot be served and is refused.
+void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, const char* access) {
+    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
+    // Mission 21: the read that trips the guard, with the size: a read this large is a host copy
+    // of a guest buffer the emulator could not bind in place, which is what the host cannot
+    // afford and what the guard refuses.
+    if (bytes >= 64u * 1024u * 1024u) {
+        static std::mutex largeMutex;
+        static int largeReports = 0;
+        std::lock_guard lock(largeMutex);
+        if (largeReports < 12) {
+            ++largeReports;
+            std::fprintf(stderr, "[diag] a large guest read at the multisample guard: the access %s, the address 0x%llx, the size %llu (%.1f MiB)\n",
+                         access, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
+                         static_cast<double>(bytes) / (1024.0 * 1024.0));
+        }
+    }
+    {
+        std::shared_lock lock(guardedMutex());
+        for (const auto& range : guarded()) {
+            if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+            if (range.surfaceBytes == 0) continue;
+            // The guarded range starts at the target's own address and the surface is its first
+            // part; a read that stays inside the surface is the one the resolve serves.
+            if (address + bytes <= range.address + range.surfaceBytes) continue;
+            // The read reaches past the surface into the sample footprint. The samples live
+            // only on the host, so the guest cannot read them; the resolve below publishes the
+            // single-sample picture into the surface, and the guest reads that. Recorded, because
+            // it is a deviation from what the console's read of the samples would return.
+            {
+                static std::mutex reportMutex;
+                static int reports = 0;
+                std::lock_guard lock(reportMutex);
+                if (reports < 8) {
+                    ++reports;
+                    std::fprintf(stderr, "[diag] a guest read reaches past a multisample surface: the access %s, the read 0x%llx+0x%zx, the surface 0x%llx+0x%llx, the target 0x%llx+0x%llx (%u samples)\n",
+                                 access, static_cast<unsigned long long>(address), bytes,
+                                 static_cast<unsigned long long>(range.surfaceAddress), static_cast<unsigned long long>(range.surfaceBytes),
+                                 static_cast<unsigned long long>(range.address), static_cast<unsigned long long>(range.bytes), range.samples);
+                }
+            }
+        }
+    }
+    // The read stays inside the target's surface: resolve the target into it, so the guest reads
+    // the resolved picture.
+    {
+        std::lock_guard lock(targetsMutex());
+        for (auto& target : targets()) {
+            if (!target->active->load(std::memory_order_acquire)) continue;
+            const auto& use = target->target;
+            if (use.surfaceAddress == 0 || use.bytes == 0) continue;
+            if (address >= use.surfaceAddress + use.bytes || use.surfaceAddress >= address + bytes) continue;
+            const auto destination = CachedStorageSurface(target->context, SurfaceForTarget(use));
+            if (destination == nullptr) continue;
+            ResolveMultisampleTarget(target->context, use, *destination, destination->AttachmentView(use.format, use.mip));
+        }
+    }
+}
+
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access) {
     RequireNoResidentDepthRead_nid_no_patch(address, bytes);
     if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
     std::shared_lock lock(guardedMutex());
     for (const auto& range : guarded()) {
         if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+        // The target's single-sample surface shares the target's address and its first bytes, and
+        // the guest owns it: the resolve writes the picture there and the guest reads it back. Only
+        // the sample footprint beyond it lives on the host, and an access into that cannot be
+        // served.
+        if (range.surfaceBytes != 0 && address + bytes <= range.address + range.surfaceBytes) continue;
         char text[256];
-        std::snprintf(text, sizeof(text), "AGC graphics: %s of 0x%llx+0x%zx overlaps multisampled color target 0x%llx+0x%llx (%u samples), whose samples are only on the host: guest access to it is not implemented", access, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(range.address), static_cast<unsigned long long>(range.bytes), range.samples);
+        std::snprintf(text, sizeof(text), "AGC graphics: %s of 0x%llx+0x%zx reaches past the single-sample surface 0x%llx+0x%llx of a multisampled color target 0x%llx+0x%llx (%u samples), whose samples are only on the host: guest access to it is not implemented", access, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(range.surfaceAddress), static_cast<unsigned long long>(range.surfaceBytes), static_cast<unsigned long long>(range.address), static_cast<unsigned long long>(range.bytes), range.samples);
         throw std::runtime_error(text);
     }
 }

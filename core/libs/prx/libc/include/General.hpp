@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "general/LogMacros.hpp"
+#include "general/DiagTrace.hpp"
 #include "general/VabiMacros.hpp"
 #include "general/ExportMacros.hpp"
 

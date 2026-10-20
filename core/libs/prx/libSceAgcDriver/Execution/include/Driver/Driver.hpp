@@ -327,6 +327,9 @@ private:
     void run(std::uint32_t id) noexcept;
 
     std::mutex mutex;
+    // The site that took the driver's mutex last, for the diagnostic that reports a long wait
+    // on it (the shader registration path and the draw path take it in opposite orders).
+    static const void*& MutexHolderSite();
     std::mutex shutdownMutex;
     std::condition_variable changed;
 

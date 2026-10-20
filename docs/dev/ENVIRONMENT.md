@@ -112,6 +112,21 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_DISPMOVE_MAX_KIB` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` | 1024 | upper bound in KiB on the read-only buffers a dispatch-cache hit moves into its template, above which the dispatch is prepared again |
 | `APS5_DRAIN_ALL` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp` |  | drains every packet, disabling the batched recording path |
 | `APS5_DRAIN_COMPLETION_LABELS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Synchronization/DeferredLabels.cpp` |  | records completion labels immediately instead of deferring them with the batch |
+| `APS5_DIAG_AUDIO` | presence | `core/libs/prx/libSceAudioOut/src/AudioOut.cpp` |  | traces the guest audio lifecycle and the signal statistics of the buffers that reach the host device (frames, channels, format, peak, rms, zero samples, queued bytes); off by default |
+| `APS5_DIAG_TARGET_AT` | string | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` |  | comma separated seconds at which a render target is captured; at most one capture per target per listed time, and the total number of captures in a run is capped by `APS5_DIAG_TARGET_MAX` |
+| `APS5_DIAG_TARGET_CAPTURE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | records a read-only copy of the selected render target into a host-visible buffer in the draw's own command batch, and writes it after that batch completes; off by default |
+| `APS5_DIAG_TARGET_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` | 6 | total number of render-target captures in a run (hard maximum 6) |
+| `APS5_DIAG_DRAW_INPUT` | presence | `core/libs/prx/libSceAgcDriver/Graphics/include/DrawInputTrace.hpp` |  | traces each draw's own inputs: the guest's vertex/index/instance counts, the draw type, the bound vertex and index buffers with their ranges and sources, the raster state in force, and the arguments actually passed to Vulkan; a bounded sample of the draws, with aggregate counters for all of them; off by default |
+| `APS5_DIAG_DRAW_INPUT_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/DrawInputTrace.hpp` | 512 | number of detailed draw-input records in a run (hard maximum 4096); the aggregate counters continue past it |
+| `APS5_DIAG_VIEWPORT` | presence | `core/libs/prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp` |  | traces the viewport's provenance: the guest's clip-viewport registers as raw bits and as decoded values, the branch the driver takes, the value stored in the state and the value that reaches `vkCmdSetViewport`, with the scissor beside it; the counters cover every decode, the detailed records are bounded; off by default |
+| `APS5_DIAG_VIEWPORT_MAX` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp` | 4096 | number of detailed viewport records in a run (hard maximum 65536); the counters continue past it and the suppressed records are counted |
+| `APS5_DIAG_PIPELINE_STATS` | string | `core/libs/prx/libSceAgcDriver/Graphics/include/PipelineStatsProbe.hpp` |  | set to `1` to request the Vulkan pipeline-statistics query feature and to measure the draws whose result the target readback captures (input assembly, vertex shader, clipping and fragment shader invocations); the feature is requested only when this is set, so the default device configuration is unchanged |
+| `APS5_DIAG_TARGET_REGION` | string | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` |  | the region of the target the capture takes, "x,y,width,height"; the region is clamped to the target, and without it the whole target is captured |
+| `APS5_DIAG_TARGET_REGION_SIZE` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` | 0 | the side of the centred square the capture takes; zero means the whole target |
+| `APS5_DIAG_TARGET_MAX_PIXELS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` | 0 | largest render target the capture may take, in pixels (width * height); zero means no limit, so the default keeps every target eligible |
+| `APS5_DIAG_TARGET_PER_TIME` | integer | `core/libs/prx/libSceAgcDriver/Graphics/include/TargetCapture.hpp` | 2 | how many targets are captured at each scheduled capture time (hard maximum 6); the due targets are taken in ascending size, so a smaller target comes before a full-size one |
+| `APS5_DIAG_DRAW` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | records one bounded correlation line per recorded draw (draw id, recorder batch, resource key fingerprint, resolved target, lookup counters) on the diagnostic channel; off by default |
+| `APS5_DIAG_TARGET` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | records the lifecycle of every render target (creation and destruction with a stable image id) and, at each present, the mapping from the display buffer to the resident image the presentation path blits; off by default |
 | `APS5_DRAW_CACHE_ENTRIES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawCache.cpp` | 4096 | number of entries in the draw cache; 0 keeps the default 4096 |
 | `APS5_DRAW_DRAIN` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketMemory.cpp` |  | treats draw packets as drains, waiting for them instead of recording ahead |
 | `APS5_DRAW_KEY_ALL_USER_WORDS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawRegisterKey.cpp` |  | includes all 32 user words in a draw's register key instead of the used count |
@@ -123,6 +138,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_DUMP_DRAW_SHADERS` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp` | 0 | hex color-target or slot-0 address whose draw's shaders are dumped |
 | `APS5_DUMP_DRAW_SLOT1` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/Draw.cpp` | 0 | hex slot-1 address whose draw's shaders and register state are dumped |
 | `APS5_DUMP_FRAMES` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` | 0 | saves the first n presented frames as frame_<index>.bmp |
+| `APS5_DUMP_FRAMES_AT` | string | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | comma separated seconds at which a frame is captured, at most one per listed time; replaces the count/spacing rule while set, so the capture count stays bounded by APS5_DUMP_FRAMES |
 | `APS5_DUMP_FRAMES_EVERY` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` | 1 | dumps every n-th presented frame |
 | `APS5_DUMP_QUEUE` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp` |  | dumps the first submissions of the queue with this hex id |
 | `APS5_DUMP_REJECTED` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/CommandValidation.cpp` |  | writes a rejected submission to rejected_submission_<n>.bin |
@@ -480,6 +496,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
+| `APS5_DIAG_PLAYGO` | presence | `core/libs/prx/libScePlayGo/Export.cpp` |  | traces each PlayGo call with its inputs, the count and ids actually returned, per-id loci and any rejection, on the diagnostic channel; off by default |
 | `APS5_PLAYGO_UNLISTED_CHUNKS` | string | `core/libs/prx/libScePlayGo/Export.cpp` |  | answer for a chunk ID the playgo manifest does not list: installed or absent; unset throws instead of answering |
 
 ### libSceSaveData.native
@@ -513,6 +530,11 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | Name | Kind | Source | Default | Description |
 |------|------|--------|---------|-------------|
 | `APS5_CRASH_INDIRECT_MEMORY` | presence | `core/libs/prx/libc/src/specifics/windows/CrashReport.cpp` |  | dumps the words the faulting registers point at in the Windows crash report |
+| `APS5_DIAG_BYTES` | integer | `core/libs/prx/libc/include/general/DiagTrace.hpp` | 33554432 | cap in bytes on detailed diagnostic events; after it the events are counted and reported instead of written |
+| `APS5_DIAG_EVENTS` | integer | `core/libs/prx/libc/include/general/DiagTrace.hpp` | 20000 | cap on detailed diagnostic events written; what it suppresses is counted and summarised |
+| `APS5_DIAG_FAILURES` | integer | `core/libs/prx/libc/include/general/DiagTrace.hpp` | 4096 | cap on diagnostic failure lines, which bypass the detailed-event cap; further failures are counted |
+| `APS5_DIAG_SUMMARY_SECS` | integer | `core/libs/prx/libc/include/general/DiagTrace.hpp` | 10 | seconds between the periodic diagnostic summary lines |
+| `APS5_DIAG_TIMESTAMPS` | presence | `core/libs/prx/libc/include/general/DiagTrace.hpp` |  | adds a wall-clock time, an elapsed time and a thread id to each diagnostic line; existing log lines are unchanged |
 | `APS5_HANG_DUMP_SECS` | integer | `core/libs/prx/libc/src/specifics/windows/CrashReport.cpp` |  | seconds after which a watchdog dumps all threads and aborts |
 | `APS5_HEAP_CACHE_MIB` | integer | `core/libs/prx/libc/src/GuestHeap.cpp` | 4096 | size in MiB of the cache of freed large blocks before the oldest are decommitted |
 | `APS5_HELPER_AFFINITY_MASK` | integer | `core/libs/prx/libc/include/CpuTopology.hpp` |  | hex core mask that helper threads (deferred release, mirror refresh) are pinned to |
@@ -534,6 +556,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 |------|------|--------|---------|-------------|
 | `ANYPS5_LOADEXEC_ARGV_SKIP` | string | `core/libs/prx/libkernel/System/src/Process.cpp` |  | on Windows, set to `1` to drop the first process argument and clear the variable |
 | `APS5_COARSE_TIMED_WAITS` | presence | `core/libs/prx/libkernel/Time/TimedWait.cpp` |  | on Windows, rounds timed waits up to the scheduler tick |
+| `APS5_DIAG_IO` | presence | `core/libs/prx/libkernel/File/include/FileTrace.hpp` |  | traces file opens, closes, reads, positioned reads and seeks with an open-instance id, the guest path, the requested and returned byte counts and failures, on the diagnostic channel; off by default |
 | `APS5_JOB_AFFINITY` | presence | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | pins the title's job worker threads to the efficiency cores of a hybrid CPU |
 | `APS5_JOB_AFFINITY_MASK` | integer | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | hex core mask that job worker threads are pinned to |
 | `APS5_NO_JOB_AFFINITY` | presence | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | disables pinning of job worker threads |

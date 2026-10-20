@@ -188,6 +188,9 @@ struct Context {
     bool multiDrawIndirect = false;
     bool drawIndirectCount = false;
     bool occlusionQueryPrecise = false;
+    // Mission 7: the device was created with the pipeline-statistics query feature (only when
+    // the diagnostic is switched on).
+    bool pipelineStatisticsQuery = false;
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool dualSrcBlend = false;

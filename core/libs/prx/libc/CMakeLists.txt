@@ -781,8 +781,21 @@ if(BUILD_TESTING)
     configure_windows_unwind(log_macros_tests)
     add_test(NAME log_macros COMMAND log_macros_tests)
     add_test(NAME log_macros_timestamps COMMAND log_macros_tests timestamps)
+    # Mission 6: the bounded PCM statistics helper.
+    add_test_executable(pcm_stats_tests ${LIBS_INCLUDE_DIR}/tests/PcmStats.cpp)
+    target_include_directories(pcm_stats_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(pcm_stats_tests PRIVATE libc)
+    configure_windows_unwind(pcm_stats_tests)
+    add_test(NAME pcm_stats COMMAND pcm_stats_tests)
+    # Mission 7: the diagnostic gate (every control is independent, the defaults are off).
+    add_test_executable(diag_trace_gate_tests ${LIBS_INCLUDE_DIR}/tests/DiagTraceGate.cpp)
+    target_include_directories(diag_trace_gate_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(diag_trace_gate_tests PRIVATE libc)
+    configure_windows_unwind(diag_trace_gate_tests)
+    add_test(NAME diag_trace_gate COMMAND diag_trace_gate_tests)
+    set_tests_properties(diag_trace_gate PROPERTIES TIMEOUT 20)
     if(WIN32)
-        set_tests_properties(log_macros log_macros_timestamps PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(log_macros log_macros_timestamps pcm_stats diag_trace_gate PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         add_test_executable(thread_name_tests ${LIBS_INCLUDE_DIR}/tests/ThreadName.cpp)
         target_include_directories(thread_name_tests PRIVATE ${LIBS_INCLUDE_DIR})

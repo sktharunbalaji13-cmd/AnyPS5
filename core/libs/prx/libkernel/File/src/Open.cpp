@@ -1,4 +1,5 @@
 #include "prx/libkernel/File/include/FileFlags.hpp"
+#include "prx/libkernel/File/include/FileTrace.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
@@ -239,6 +240,7 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
         const int fd = File::OpenRandomDevice();
         if (fd < 0) return SceErrorFromErrno(errno);
         File::RememberDescriptor(fd, flags);
+        FileTrace::Open(path, std::string(), fd, false);
         return fd;
     }
     std::filesystem::path native;
@@ -246,6 +248,7 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
     if (const int error = ResolvePathError_nid_no_patch(path, native, module, true)) {
         const int result = SceKernelError(error);
         APS5_LOG_ERR("open failed path=%s resolveError=%d result=0x%08X", path != nullptr ? path : "<null>", error, static_cast<unsigned>(result));
+        FileTrace::Open(path, std::string(), result, false);
         return result;
     }
     const int result = OpenNative(native, flags, mode);
@@ -253,6 +256,8 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
         const auto resolved = native.u8string();
         APS5_LOG_ERR("open failed path=%s resolvedPath=%s result=0x%08X", path != nullptr ? path : "<null>", reinterpret_cast<const char*>(resolved.c_str()), static_cast<unsigned>(result));
     }
+    const std::string hostPath(reinterpret_cast<const char*>(native.u8string().c_str()));
+    FileTrace::Open(path, hostPath, result, result >= 0);
     return result;
 }
 
@@ -281,6 +286,7 @@ int APS5_VABI sceKernelClose(int d) {
         if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF;
         throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }
+    FileTrace::Close(d, 0);
     return 0;
 }
 
@@ -297,9 +303,17 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) errno = EFAULT;
     else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
-    else if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, nullptr)) return *archived;
+    else if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, nullptr)) {
+        FileTrace::Read("read", d, nbytes, *archived, -1);
+        return *archived;
+    }
     auto n = destination.Open() ? NativeRead(d, buf, nbytes) : -1;
-    if (n < 0) return SceIoErrorFromErrno(errno);
+    if (n < 0) {
+        const std::int64_t failure = SceIoErrorFromErrno(errno);
+        FileTrace::Read("read", d, nbytes, failure, -1);
+        return failure;
+    }
+    FileTrace::Read("read", d, nbytes, static_cast<std::int64_t>(n), -1);
     return static_cast<std::int64_t>(n);
 }
 
@@ -332,7 +346,12 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     }
 #endif
     std::int64_t result = NativeLseek(d, offset, whence);
-    if (result < 0) return SceIoErrorFromErrno(errno);
+    if (result < 0) {
+        const std::int64_t failure = SceIoErrorFromErrno(errno);
+        FileTrace::Seek(d, whence, offset, failure, true);
+        return failure;
+    }
+    FileTrace::Seek(d, whence, offset, result, false);
     return result;
 }
 

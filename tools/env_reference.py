@@ -10,7 +10,8 @@ ROOTS = ("core",)
 EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".py"}
 SKIP = {"build", "build-linux", "build-relinker", "3rdparty", ".git"}
 
-INTEGER_READERS = {"kibSetting", "MaskFromEnvironment", "EnvInt", "configured", "environmentCount"}
+INTEGER_READERS = {"kibSetting", "MaskFromEnvironment", "EnvInt", "configured", "environmentCount", "EnvLimit"}
+PRESENCE_READERS = {"IsEnvironmentSet", "Enabled"}
 STRING_READERS = {"GetEnvironmentVariableA", "GetEnvironmentVariableW", "addWideString"}
 NULL_TEST = re.compile(r"[!=]=\s*(nullptr|NULL|0)\b|!\s*(?:std::)?getenv\(")
 INTEGER_TEST = re.compile(r"\b(atoi|strtol|strtoul|strtoll|strtoull|stoi|stol|stoul|from_chars|atoi64)\s*\(")
@@ -29,6 +30,8 @@ def forms(prefixes=PREFIXES):
     return (
         ("getenv", re.compile(r'(?:std::)?getenv\(\s*"(?P<name>' + name + r')"\s*\)')),
         ("IsEnvironmentSet", re.compile(r'IsEnvironmentSet\(\s*"(?P<name>' + name + r')"\s*\)')),
+        ("Enabled", re.compile(r'\bEnabled\(\s*"(?P<name>' + name + r')"\s*\)')),
+        ("EnvLimit", re.compile(r'\bEnvLimit\(\s*"(?P<name>' + name + r')"\s*,\s*(?P<default>[0-9]+)[uUlL]*')),
         ("MaskFromEnvironment", re.compile(r'MaskFromEnvironment\(\s*"(?P<name>' + name + r')"\s*\)')),
         ("kibSetting", re.compile(r'kibSetting\(\s*"(?P<name>' + name + r')"\s*,\s*(?P<default>[0-9]+)')),
         ("EnvInt", re.compile(r'EnvInt\(\s*"(?P<name>' + name + r')"\s*,\s*(?P<default>-?[0-9]+)')),
@@ -50,7 +53,7 @@ def documented_pattern(prefixes):
 
 
 def kind_of(reader, window):
-    if reader == "IsEnvironmentSet":
+    if reader in PRESENCE_READERS:
         return "presence"
     if reader in INTEGER_READERS:
         return "integer"

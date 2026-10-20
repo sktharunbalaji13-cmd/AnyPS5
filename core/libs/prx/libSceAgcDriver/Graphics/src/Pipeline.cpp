@@ -2,6 +2,10 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawInputTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PushTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -568,6 +572,29 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
             Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines");
         }
+        // Mission 9: the pipeline's vertex-input state, as the pipeline was built with it. A
+        // pipeline with no binding and no attribute takes no vertex buffer at all.
+        if (DrawInputTrace::Enabled()) {
+            static std::atomic<std::uint64_t> reported{0};
+            const auto index = reported.fetch_add(1, std::memory_order_relaxed);
+            if (index < 64) {
+                Aps5Diag::Event("pipeline-vertex-input",
+                                "event=pipeline index=%llu bindings=%zu attributes=%zu empty=%d",
+                                static_cast<unsigned long long>(index), vertexInput.bindings.size(), vertexInput.attributes.size(),
+                                (vertexInput.bindings.empty() && vertexInput.attributes.empty()) ? 1 : 0);
+                for (const auto& binding : vertexInput.bindings) {
+                    Aps5Diag::Event("pipeline-vertex-input",
+                                    "event=binding index=%llu binding=%u stride=%u input_rate=%u",
+                                    static_cast<unsigned long long>(index), binding.binding, binding.stride, binding.inputRate);
+                }
+                for (const auto& attribute : vertexInput.attributes) {
+                    Aps5Diag::Event("pipeline-vertex-input",
+                                    "event=attribute index=%llu location=%u binding=%u format=%u offset=%u",
+                                    static_cast<unsigned long long>(index), attribute.location, attribute.binding,
+                                    attribute.format, attribute.offset);
+                }
+            }
+        }
         if (alternateAlpha) {
             blend.pAttachments = secondChannels.data();
             auto pipelineCacheLock = context.LockPipelineCacheForUse();
@@ -745,6 +772,21 @@ void Pipeline::Continue(VkCommandBuffer commands, const State& state) const {
     if (optimized != nullptr) optimized->Schedule();
     const auto best = optimized != nullptr ? optimized->handle.load() : VK_NULL_HANDLE;
     context.Resolved(&DeviceFunctions::cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, best != VK_NULL_HANDLE ? best : pipeline);
+    // Mission 8: the viewport as it reaches the Vulkan command, with its raw bits, so the
+    // value that the rasterizer sees is recorded and not inferred.
+    // Mission 9: the emission event is per draw, so it is bounded: the first draws are enough
+    // to show what reaches the Vulkan boundary.
+    static std::atomic<std::uint64_t> emitted{0};
+    const bool traceViewport = ViewportTrace::Enabled() && emitted.fetch_add(1, std::memory_order_relaxed) < 512;
+    if (traceViewport) {
+        Aps5Diag::Event("viewport",
+                        "event=emit batch=%llu x=%s y=%s w=%s h=%s min=%s max=%s scissor=%u,%u,%u,%u",
+                        static_cast<unsigned long long>(context.recorder != nullptr ? context.recorder->OpenSerial() : 0),
+                        ViewportTrace::FormatFloat(state.viewport.x).c_str(), ViewportTrace::FormatFloat(state.viewport.y).c_str(),
+                        ViewportTrace::FormatFloat(state.viewport.width).c_str(), ViewportTrace::FormatFloat(state.viewport.height).c_str(),
+                        ViewportTrace::FormatFloat(state.viewport.minDepth).c_str(), ViewportTrace::FormatFloat(state.viewport.maxDepth).c_str(),
+                        state.scissor.offset.x, state.scissor.offset.y, state.scissor.extent.width, state.scissor.extent.height);
+    }
     context.Resolved(&DeviceFunctions::cmdSetViewport, "vkCmdSetViewport")(commands, 0, 1, &state.viewport);
     context.Resolved(&DeviceFunctions::cmdSetScissor, "vkCmdSetScissor")(commands, 0, 1, &state.scissor);
     if (state.stencilReplayReference) context.Resolved(&DeviceFunctions::cmdSetStencilReference, "vkCmdSetStencilReference")(commands, VK_STENCIL_FACE_FRONT_AND_BACK, *state.stencilReplayReference);
@@ -794,6 +836,27 @@ void Pipeline::ContinueBackFaces(VkCommandBuffer commands, const State& state) c
 
 void Pipeline::PushConstants(VkCommandBuffer commands, VkShaderStageFlags stages, std::span<const std::byte, PipelinePushConstantBytes> bytes) const {
     if (stages == 0) return;
+    // Mission 10: the bytes at the Vulkan push boundary, compared with the assembled ones.
+    if (PushTrace::Enabled()) {
+        auto& pending = PushTrace::Correlator::Current();
+        if (pending.active && pending.offset + pending.bytes.size() <= bytes.size()) {
+            std::vector<std::uint8_t> uploaded(pending.bytes.size());
+            std::memcpy(uploaded.data(), bytes.data() + pending.offset, uploaded.size());
+            const bool identical = uploaded == pending.bytes;
+            pending.uploaded = true;
+            Aps5Diag::Event("push-trace",
+                            "event=push_uploaded mono_ns=%llu elapsed_ms=%llu corr=%llu shader=%s stages=0x%x offset=%u length=%zu "
+                            "hash=%016llx hex=%s words=%s identical=%d",
+                            static_cast<unsigned long long>(PushTrace::MonoNanoseconds()),
+                            static_cast<unsigned long long>(PushTrace::ElapsedMilliseconds()),
+                            static_cast<unsigned long long>(pending.correlation), pending.identity.c_str(),
+                            static_cast<unsigned>(stages), pending.offset, pending.bytes.size(),
+                            static_cast<unsigned long long>(PushTrace::Fingerprint(uploaded.data(), uploaded.size())),
+                            PushTrace::Hex(uploaded.data(), uploaded.size()).c_str(),
+                            PushTrace::Words(uploaded.data(), uploaded.size()).c_str(),
+                            identical ? 1 : 0);
+        }
+    }
     if (dynamicRendering) {
         context.Resolved(&DeviceFunctions::cmdPushConstants, "vkCmdPushConstants")(commands, layout, pushStagesOf(context), 0, PipelinePushSlotBytes, bytes.data());
         context.Resolved(&DeviceFunctions::cmdPushConstants, "vkCmdPushConstants")(commands, layout, VK_SHADER_STAGE_FRAGMENT_BIT, PipelinePushSlotBytes, PipelinePushSlotBytes, bytes.data() + PipelinePushSlotBytes);

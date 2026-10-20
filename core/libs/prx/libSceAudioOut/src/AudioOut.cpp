@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <prx/libc/include/General.hpp>
+#include <prx/libc/include/general/DiagTrace.hpp>
+#include <prx/libc/include/general/PcmStats.hpp>
 
 #include "SDL.h"
 #include "SceTypes.hpp"
@@ -17,6 +19,18 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceAudioOut/include/AudioOutSdl.hpp"
 #include "AudioOutShutdown.hpp"
+
+// Mission 6: the audio diagnostics are opt-in and cost one cached boolean test when off.
+namespace {
+bool AudioDiagnostics() {
+    static const bool on = Aps5Diag::Enabled("APS5_DIAG_AUDIO");
+    return on;
+}
+} // namespace
+
+#define APS5_AUDIO_EVENT(...) do { if (AudioDiagnostics()) Aps5Diag::Event(__VA_ARGS__); } while (0)
+#define APS5_AUDIO_FAILURE(...) do { if (AudioDiagnostics()) Aps5Diag::Failure(__VA_ARGS__); } while (0)
+
 
 static constexpr int PORT_TYPE_MAIN = 0;
 static constexpr int PORT_TYPE_BGM = 1;
@@ -150,10 +164,20 @@ static bool openDevice(Port& port) {
     SDL_AudioSpec obtained{};
     port.device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
     if (port.device == 0) {
+        // Mission 6: the host device could not be opened; the port stays virtual and the
+        // title's audio never reaches a host backend.
+        APS5_AUDIO_FAILURE("audio", "event=device-open-failed port=%d freq=%u channels=%d format=%s error=%s",
+                           port.type, port.freq, port.channels, formatIsFloat(port.format) ? "f32" : "s16",
+                           SDL_GetError());
         return false;
     }
     port.spec = obtained;
     SDL_PauseAudioDevice(port.device, 0);
+    // Mission 6: the host backend and the stream format that was actually obtained.
+    APS5_AUDIO_EVENT("audio", "event=device-open port=%d device=%u backend=SDL requested_freq=%u requested_channels=%d requested_samples=%u obtained_freq=%u obtained_channels=%u obtained_format=%u obtained_samples=%u",
+                     port.type, static_cast<unsigned>(port.device), port.freq, port.channels, port.samplesNum,
+                     static_cast<unsigned>(obtained.freq), static_cast<unsigned>(obtained.channels),
+                     static_cast<unsigned>(obtained.format), static_cast<unsigned>(obtained.samples));
     return true;
 }
 
@@ -227,13 +251,19 @@ static void sleepUs(std::unique_lock<std::mutex>& lock, std::uint64_t us) {
 static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
     if (data == nullptr) {
         const std::uint64_t waitStart = sceKernelGetProcessTime();
+        bool cleared = false;
         while (SDL_GetQueuedAudioSize(port.device) > 0) {
             if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
                 SDL_ClearQueuedAudio(port.device);
+                cleared = true;
                 break;
             }
             sleepUs(lock, DRAIN_SLEEP_US);
         }
+        // Mission 6: the title submitted an empty buffer; the port was drained instead.
+        APS5_AUDIO_EVENT("audio", "event=empty-buffer port=%d device=%u cleared=%d queued=%u",
+                         port.type, static_cast<unsigned>(port.device), cleared ? 1 : 0,
+                         static_cast<unsigned>(SDL_GetQueuedAudioSize(port.device)));
         return;
     }
 
@@ -253,14 +283,29 @@ static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex
         : 2u;
     const std::uint32_t minQueued = queueSize * std::clamp(buffers, 2u, 16u);
     const std::uint64_t waitStart = sceKernelGetProcessTime();
+    const auto queuedBefore = static_cast<std::uint32_t>(SDL_GetQueuedAudioSize(port.device));
+    bool cleared = false;
 
     while (SDL_GetQueuedAudioSize(port.device) > minQueued) {
         if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
             SDL_ClearQueuedAudio(port.device);
+            cleared = true;
             break;
         }
         sleepUs(lock, DRAIN_SLEEP_US);
     }
+
+    // Mission 6: the signal statistics of the buffer that is about to reach the host device.
+    // The format is known here (the port's own format and channel count), so the samples are
+    // interpreted as PCM; the buffer itself is not modified.
+    const auto stats = Aps5Pcm::Compute(queueData, queueSize, static_cast<std::uint32_t>(port.channels), formatIsFloat(port.format));
+    APS5_AUDIO_EVENT("audio", "event=host-queue port=%d device=%u freq=%u frames=%u channels=%d format=%s bytes=%u queued_before=%u queued_after=%u peak=%.6f rms=%.6f zero_samples=%llu/%llu cleared=%d",
+                     port.type, static_cast<unsigned>(port.device), port.freq, port.samplesNum, port.channels,
+                     formatIsFloat(port.format) ? "f32" : "s16", queueSize, queuedBefore,
+                     static_cast<unsigned>(SDL_GetQueuedAudioSize(port.device)),
+                     stats.peak, stats.rms,
+                     static_cast<unsigned long long>(stats.zeroSamples),
+                     static_cast<unsigned long long>(stats.sampleCount), cleared ? 1 : 0);
 
     if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
         throw std::runtime_error(std::string("SDL_QueueAudio: ") + SDL_GetError());
@@ -391,12 +436,18 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
         queueAudio(*port, ptr, lock);
     }
     if (ptr != nullptr) port->lastDataOutputTime = sceKernelGetProcessTime();
+    // Mission 6: the guest's submission itself, and whether it had data at all.
+    APS5_AUDIO_EVENT("audio", "event=guest-output handle=%d port=%d has_data=%d virtual=%d device=%u samples=%u freq=%u channels=%d",
+                     handle, port->type, ptr != nullptr ? 1 : 0, port->device == 0 ? 1 : 0,
+                     static_cast<unsigned>(port->device), port->samplesNum, port->freq, port->channels);
     return static_cast<int>(port->samplesNum);
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) try {
+    // Mission 7: the multi-port submit had no diagnostic event at all.
+    APS5_AUDIO_EVENT("audio", "event=guest-outputs count=%u", num);
     const AudioOutCall call;
     if (param == nullptr || num == 0) {
         return -2144993276;

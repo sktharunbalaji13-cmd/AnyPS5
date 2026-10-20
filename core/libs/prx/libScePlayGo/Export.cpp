@@ -22,6 +22,9 @@ static constexpr int8_t PLAYGO_LOCUS_LOCAL_FAST = 3;
 static constexpr uint64_t PLAYGO_LANGUAGE_MASK_ALL = ~0ull;
 static constexpr uint64_t PLAYGO_OPTIONAL_CHUNK_MASK_ALL = ~0ull;
 static constexpr int32_t PLAYGO_INSTALL_SPEED_FULL = 2;
+// The room a title passes to scePlayGoGetChunkId for a dump that has only a scenario file:
+// the chunk set is then every id below it, so the title keeps every chunk it can see.
+static constexpr uint32_t PLAYGO_SCENARIO_CHUNK_COUNT = 1000;
 
 static int32_t g_installSpeed = PLAYGO_INSTALL_SPEED_FULL;
 
@@ -34,6 +37,74 @@ struct ChunkTable {
     bool defined = false;
     bool scenario = false;
 };
+
+// Mission 3 diagnostics: opt-in PlayGo call and result tracing (APS5_DIAG_PLAYGO).
+// Observation only: no return value, status, output array or branch below is changed.
+namespace {
+
+bool PlayGoDiag() {
+    static const bool on = Aps5Diag::Enabled("APS5_DIAG_PLAYGO");
+    return on;
+}
+
+constexpr uint32_t PlayGoDiagSample = 32;
+
+// Bounded sample of an input/output id array. The caller must pass a count the API has
+// already validated or written.
+std::string PlayGoIds(const uint16_t* ids, uint32_t count) {
+    if (ids == nullptr) return "<null> (" + std::to_string(count) + " entries)";
+    std::string text;
+    const uint32_t shown = count < PlayGoDiagSample ? count : PlayGoDiagSample;
+    for (uint32_t index = 0; index < shown; ++index) {
+        if (index != 0) text += ",";
+        text += std::to_string(ids[index]);
+    }
+    if (count > shown) text += ",...";
+    return text + " (" + std::to_string(count) + " entries)";
+}
+
+std::string PlayGoLoci(const int8_t* loci, uint32_t count) {
+    std::string text;
+    const uint32_t shown = count < PlayGoDiagSample ? count : PlayGoDiagSample;
+    for (uint32_t index = 0; index < shown; ++index) {
+        if (index != 0) text += ",";
+        text += std::to_string(static_cast<int>(loci[index]));
+    }
+    if (count > shown) text += ",...";
+    return text;
+}
+
+void PlayGoNote(const std::string& text) {
+    if (!PlayGoDiag()) return;
+    Aps5Diag::Event("playgo", "%s", text.c_str());
+}
+
+void PlayGoFailure(const std::string& text) {
+    if (!PlayGoDiag()) return;
+    Aps5Diag::Failure("playgo", "%s", text.c_str());
+}
+
+std::string PlayGoError(int value) {
+    static const char* const digits = "0123456789ABCDEF";
+    std::string text = "0x";
+    const unsigned bits = static_cast<unsigned>(value);
+    for (int shift = 28; shift >= 0; shift -= 4) text += digits[(bits >> shift) & 0xF];
+    return text;
+}
+
+std::string PlayGoToDoList(const PlayGoToDo* todo, uint32_t count) {
+    if (todo == nullptr) return "<null>";
+    std::string text;
+    const uint32_t shown = count < PlayGoDiagSample ? count : PlayGoDiagSample;
+    for (uint32_t index = 0; index < shown; ++index) {
+        if (index != 0) text += ",";
+        text += std::to_string(todo[index].chunk_id) + "/" + std::to_string(static_cast<int>(todo[index].locus));
+    }
+    if (count > shown) text += ",...";
+    return text + " (" + std::to_string(count) + " entries)";
+}
+
+} // namespace
 
 static bool ReadPackageChunks(ChunkTable& table) {
     constexpr std::size_t CountOffset = 0x0A;
@@ -65,9 +136,19 @@ static const ChunkTable& Chunks() {
         ChunkTable table;
         std::ifstream file(ResolvePath_nid_no_patch("/app0/playgo-chunkdefs.xml"));
         if (!file) {
-            if (ReadPackageChunks(table)) return table;
+            if (ReadPackageChunks(table)) {
+                PlayGoNote("chunk-set source=playgo-chunk.dat ids=" + std::to_string(table.ids.size()));
+                return table;
+            }
             table.scenario = std::ifstream(ResolvePath_nid_no_patch("/app0/sce_sys/playgo-scenario.json")).good();
             if (!table.scenario) RejectUnreadablePlayGoFiles();
+            // A scenario-only dump names no chunks, so the enumeration lists every id below
+            // the room a title passes. A title that builds its set of installed chunks from
+            // that list keeps only the chunks it sees, so listing only the initialiser leaves
+            // the title's other chunks uninstalled and unread.
+            else for (uint32_t id = 1; id < PLAYGO_SCENARIO_CHUNK_COUNT; ++id) table.ids.insert(static_cast<uint16_t>(id));
+            PlayGoNote("chunk-set source=playgo-scenario.json(only) ids=" + std::to_string(table.ids.size()) +
+                       " note=enumeration lists every id below " + std::to_string(PLAYGO_SCENARIO_CHUNK_COUNT));
             return table;
         }
         table.defined = true;
@@ -82,6 +163,7 @@ static const ChunkTable& Chunks() {
             const auto last = std::stoul(match[1].str());
             for (unsigned long id = 0; id <= last && id <= 0xFFFF; ++id) result.insert(static_cast<uint16_t>(id));
         }
+        PlayGoNote("chunk-set source=playgo-chunkdefs.xml ids=" + std::to_string(table.ids.size()));
         return table;
     }();
     return chunks;
@@ -124,16 +206,28 @@ static int ValidateChunks(const uint16_t* chunk_ids, uint32_t number_of_entries)
 extern "C" {
 
 int APS5_VABI scePlayGoClose(int handle) {
-    if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
+    if (handle != PLAYGO_HANDLE) {
+        PlayGoFailure("scePlayGoClose handle=" + std::to_string(handle) + " result=BAD_HANDLE");
+        return SCE_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    PlayGoNote("scePlayGoClose handle=" + std::to_string(handle) + " result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list, uint32_t number_of_entries, uint32_t* out_entries) {
-    if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
-    if (!out_entries) return SCE_PLAYGO_ERROR_BAD_POINTER;
+    if (handle != PLAYGO_HANDLE) {
+        PlayGoFailure("scePlayGoGetChunkId handle=" + std::to_string(handle) + " result=BAD_HANDLE");
+        return SCE_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!out_entries) {
+        PlayGoFailure("scePlayGoGetChunkId out_entries=null result=BAD_POINTER");
+        return SCE_PLAYGO_ERROR_BAD_POINTER;
+    }
     const auto& valid = Chunks().ids;
     if (!out_chunk_id_list) {
         *out_entries = static_cast<uint32_t>(valid.size());
+        PlayGoNote("scePlayGoGetChunkId capacity=0 (count query) enumeration_count=" +
+                   std::to_string(*out_entries) + " table_ids=" + std::to_string(valid.size()));
         return 0;
     }
     uint32_t written = 0;
@@ -142,18 +236,26 @@ int APS5_VABI scePlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list, uint3
         out_chunk_id_list[written++] = id;
     }
     *out_entries = written;
+    PlayGoNote("scePlayGoGetChunkId capacity=" + std::to_string(number_of_entries) + " returned_count=" +
+               std::to_string(written) + " ids=" + PlayGoIds(out_chunk_id_list, written) +
+               " table_ids=" + std::to_string(valid.size()));
     return 0;
 }
 
 int APS5_VABI scePlayGoGetEta(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, int64_t* out_eta) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     if (!out_eta) return SCE_PLAYGO_ERROR_BAD_POINTER;
-    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) return error;
+    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) {
+        PlayGoFailure("scePlayGoGetEta ids=" + PlayGoIds(chunk_ids, number_of_entries) + " result=" + PlayGoError(error));
+        return error;
+    }
     *out_eta = 0;
+    PlayGoNote("scePlayGoGetEta ids=" + PlayGoIds(chunk_ids, number_of_entries) + " eta=0 result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoGetInstallChunkId(int handle, uint16_t* out_chunk_id_list, uint32_t number_of_entries, uint32_t* out_entries) {
+    PlayGoNote("scePlayGoGetInstallChunkId -> scePlayGoGetChunkId capacity=" + std::to_string(number_of_entries));
     return scePlayGoGetChunkId(handle, out_chunk_id_list, number_of_entries, out_entries);
 }
 
@@ -168,14 +270,20 @@ int APS5_VABI scePlayGoGetLanguageMask(int handle, uint64_t* out_language_mask) 
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     if (!out_language_mask) return SCE_PLAYGO_ERROR_BAD_POINTER;
     *out_language_mask = PLAYGO_LANGUAGE_MASK_ALL;
+    PlayGoNote("scePlayGoGetLanguageMask mask=0xFFFFFFFFFFFFFFFF result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, int8_t* out_loci) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     if (!out_loci) return SCE_PLAYGO_ERROR_BAD_POINTER;
-    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) return error;
+    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) {
+        PlayGoFailure("scePlayGoGetLocus ids=" + PlayGoIds(chunk_ids, number_of_entries) + " result=" + PlayGoError(error));
+        return error;
+    }
     for (uint32_t index = 0; index < number_of_entries; ++index) out_loci[index] = PLAYGO_LOCUS_LOCAL_FAST;
+    PlayGoNote("scePlayGoGetLocus ids=" + PlayGoIds(chunk_ids, number_of_entries) + " loci=" +
+               PlayGoLoci(out_loci, number_of_entries) + " result=0");
     return 0;
 }
 
@@ -184,15 +292,21 @@ int APS5_VABI scePlayGoGetOptionalChunk(int handle, int32_t type, PlayGoOptional
     (void)type;
     if (!option) return SCE_PLAYGO_ERROR_BAD_POINTER;
     option->bitmask = PLAYGO_OPTIONAL_CHUNK_MASK_ALL;
+    PlayGoNote("scePlayGoGetOptionalChunk type=" + std::to_string(type) + " bitmask=0xFFFFFFFFFFFFFFFF result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoGetProgress(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, PlayGoProgress* out_progress) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     if (!out_progress) return SCE_PLAYGO_ERROR_BAD_POINTER;
-    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) return error;
+    if (const int error = ValidateChunks(chunk_ids, number_of_entries)) {
+        PlayGoFailure("scePlayGoGetProgress ids=" + PlayGoIds(chunk_ids, number_of_entries) + " result=" + PlayGoError(error));
+        return error;
+    }
     out_progress->progress_size = 1;
     out_progress->total_size = 1;
+    PlayGoNote("scePlayGoGetProgress ids=" + PlayGoIds(chunk_ids, number_of_entries) +
+               " progress=1 total=1 result=0");
     return 0;
 }
 
@@ -201,6 +315,8 @@ int APS5_VABI scePlayGoGetSupportedOptionalChunk(int handle, int32_t type, PlayG
     (void)type;
     if (!option) return SCE_PLAYGO_ERROR_BAD_POINTER;
     option->bitmask = PLAYGO_OPTIONAL_CHUNK_MASK_ALL;
+    PlayGoNote("scePlayGoGetSupportedOptionalChunk type=" + std::to_string(type) +
+               " bitmask=0xFFFFFFFFFFFFFFFF result=0");
     return 0;
 }
 
@@ -210,11 +326,16 @@ int APS5_VABI scePlayGoGetToDoList(int handle, PlayGoToDo* out_todo_list, uint32
     (void)number_of_entries;
     if (!out_entries) return SCE_PLAYGO_ERROR_BAD_POINTER;
     *out_entries = 0;
+    PlayGoNote("scePlayGoGetToDoList capacity=" + std::to_string(number_of_entries) + " returned_count=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoInitialize(const PlayGoInitParams* init) {
-    if (!init) return SCE_PLAYGO_ERROR_BAD_POINTER;
+    if (!init) {
+        PlayGoFailure("scePlayGoInitialize init=null result=BAD_POINTER");
+        return SCE_PLAYGO_ERROR_BAD_POINTER;
+    }
+    PlayGoNote("scePlayGoInitialize result=0");
     return 0;
 }
 
@@ -222,25 +343,36 @@ int APS5_VABI scePlayGoOpen(int* out_handle, const void* param) {
     (void)param;
     if (!out_handle) return SCE_PLAYGO_ERROR_BAD_POINTER;
     *out_handle = PLAYGO_HANDLE;
+    PlayGoNote("scePlayGoOpen handle=" + std::to_string(PLAYGO_HANDLE) + " result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoPrefetch(int handle, const uint16_t* chunk_ids, uint32_t number_of_entries, int8_t minimum_locus) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     (void)minimum_locus;
-    return ValidateChunks(chunk_ids, number_of_entries);
+    const int result = ValidateChunks(chunk_ids, number_of_entries);
+    if (result != 0) {
+        PlayGoFailure("scePlayGoPrefetch ids=" + PlayGoIds(chunk_ids, number_of_entries) + " minimum_locus=" +
+                      std::to_string(static_cast<int>(minimum_locus)) + " result=" + PlayGoError(result));
+        return result;
+    }
+    PlayGoNote("scePlayGoPrefetch ids=" + PlayGoIds(chunk_ids, number_of_entries) + " minimum_locus=" +
+               std::to_string(static_cast<int>(minimum_locus)) + " result=0");
+    return result;
 }
 
 int APS5_VABI scePlayGoPrefetchOptionalChunk(int handle, int32_t type, const PlayGoOptionalChunk* option) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     (void)type;
     (void)option;
+    PlayGoNote("scePlayGoPrefetchOptionalChunk type=" + std::to_string(type) + " result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoSetInstallSpeed(int handle, int32_t speed) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     g_installSpeed = speed;
+    PlayGoNote("scePlayGoSetInstallSpeed speed=" + std::to_string(speed));
     return 0;
 }
 
@@ -249,14 +381,24 @@ int APS5_VABI scePlayGoSetToDoList(int handle, const PlayGoToDo* todo_list, uint
     if (!todo_list) return SCE_PLAYGO_ERROR_BAD_POINTER;
     if (number_of_entries == 0) return SCE_PLAYGO_ERROR_BAD_SIZE;
     for (uint32_t index = 0; index < number_of_entries; ++index) {
-        if (!IsKnownChunk(todo_list[index].chunk_id)) return SCE_PLAYGO_ERROR_BAD_CHUNK_ID;
+        if (!IsKnownChunk(todo_list[index].chunk_id)) {
+            PlayGoFailure("scePlayGoSetToDoList ids=" + PlayGoToDoList(todo_list, number_of_entries) +
+                          " rejected_at=" + std::to_string(index) + " result=" + PlayGoError(SCE_PLAYGO_ERROR_BAD_CHUNK_ID));
+            return SCE_PLAYGO_ERROR_BAD_CHUNK_ID;
+        }
         const int8_t locus = todo_list[index].locus;
-        if (locus != PLAYGO_LOCUS_NOT_DOWNLOADED && locus != PLAYGO_LOCUS_LOCAL_SLOW && locus != PLAYGO_LOCUS_LOCAL_FAST) return SCE_PLAYGO_ERROR_BAD_LOCUS;
+        if (locus != PLAYGO_LOCUS_NOT_DOWNLOADED && locus != PLAYGO_LOCUS_LOCAL_SLOW && locus != PLAYGO_LOCUS_LOCAL_FAST) {
+            PlayGoFailure("scePlayGoSetToDoList ids=" + PlayGoToDoList(todo_list, number_of_entries) +
+                          " rejected_at=" + std::to_string(index) + " result=" + PlayGoError(SCE_PLAYGO_ERROR_BAD_LOCUS));
+            return SCE_PLAYGO_ERROR_BAD_LOCUS;
+        }
     }
+    PlayGoNote("scePlayGoSetToDoList ids=" + PlayGoToDoList(todo_list, number_of_entries) + " result=0");
     return 0;
 }
 
 int APS5_VABI scePlayGoTerminate(void) {
+    PlayGoNote("scePlayGoTerminate result=0");
     return 0;
 }
 

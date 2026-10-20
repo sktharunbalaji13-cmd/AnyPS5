@@ -391,6 +391,9 @@ TextureCounters& TextureCounts() {
     return counters;
 }
 
+// Mission 4: the number of live storage-cache entries (distinct resident surface keys).
+std::uint64_t storageCacheEntries();
+
 void reportTextureCounters() {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;
@@ -399,7 +402,7 @@ void reportTextureCounters() {
     auto last = counters.lastReport.load();
     if (nowMs - last < 10000 || !counters.lastReport.compare_exchange_strong(last, nowMs)) return;
     const auto count = [](const std::atomic<std::uint64_t>& value) { return static_cast<unsigned long long>(value.load(std::memory_order_relaxed)); };
-    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved; untracked snapshots %llu kept by the write-watch hint, %llu compared\n", count(counters.fromStorage), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.untrackedKept), count(counters.untrackedCompared));
+    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved; untracked snapshots %llu kept by the write-watch hint, %llu compared; storage entries %llu\n", count(counters.fromStorage), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.untrackedKept), count(counters.untrackedCompared), static_cast<unsigned long long>(storageCacheEntries()));
 }
 
 // What the sampled-texture lookups on this thread proved their returned objects current against,
@@ -516,6 +519,7 @@ std::shared_ptr<StorageTexture> sampledStorageSource(const Context& context, con
 }
 
 std::uint64_t storageCacheBytes();
+std::uint64_t storageCacheEntries();
 
 std::optional<std::uint32_t> largestDeviceLocalHeap(const VkPhysicalDeviceMemoryProperties& memory) {
     std::optional<std::uint32_t> heap;
@@ -646,6 +650,58 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     auto& counters = TextureCounts();
     const auto address = resource.baseAddress;
     const auto bytes = static_cast<std::size_t>(guestBytes);
+    // Mission 21: the guest's own bytes for a sampled surface against the device's copy of the
+    // same range (the import's buffer). The import is a host-pointer import of the guest's own
+    // pages, so the device must read exactly what the guest writes: a difference means the
+    // device reads something else, and an all-zero pair means the guest has no data there.
+    if (Aps5Diag::Enabled("APS5_DIAG_IMPORT_CONTENT")) {
+        static std::mutex probeLock;
+        static std::set<std::uint64_t> probed;
+        const auto* import = HostImportFor(context, address, bytes);
+        bool probe = false;
+        if (import != nullptr) {
+            std::lock_guard lock(probeLock);
+            probe = probed.insert(address).second;
+        }
+        if (import != nullptr && probe) {
+            const std::size_t probeBytes = std::min<std::size_t>(4096, bytes);
+            std::vector<std::byte> host(probeBytes);
+            GuestMemory::ReadCommitted(address, host);
+            std::size_t hostNonzero = 0;
+            for (const auto byte : host) if (byte != std::byte{0}) ++hostNonzero;
+            auto* recorder = Recorder::Active();
+            if (recorder != nullptr) {
+                auto readback = std::make_shared<Buffer>(context, probeBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                const VkBufferCopy region{HostImportOffset(*import, address), 0, probeBytes};
+                context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(recorder->Commands(), import->buffer, readback->Handle(), 1, &region);
+                recorder->Keep(readback, probeBytes);
+                recorder->OnComplete([readback, host = std::move(host), address, probeBytes, hostNonzero,
+                                      base = import->base, offset = HostImportOffset(*import, address),
+                                      memoryType = import->memoryType, unwatched = import->unwatched] {
+                    const auto actual = readback->Bytes();
+                    std::size_t deviceNonzero = 0;
+                    std::size_t difference = probeBytes;
+                    for (std::size_t index = 0; index < probeBytes; ++index) {
+                        if (actual[index] != std::byte{0}) ++deviceNonzero;
+                        if (difference == probeBytes && actual[index] != host[index]) difference = index;
+                    }
+                    std::fprintf(stderr, "[diag] the import content 0x%llx: the host nonzero %zu of %zu, the device nonzero %zu of %zu, the first difference at %zu, the import base 0x%llx the offset %llu the memoryType %u the unwatched %d\n",
+                                 static_cast<unsigned long long>(address), hostNonzero, probeBytes, deviceNonzero, probeBytes, difference,
+                                 static_cast<unsigned long long>(base), static_cast<unsigned long long>(offset), memoryType, unwatched ? 1 : 0);
+                });
+            } else {
+                std::fprintf(stderr, "[diag] the import content 0x%llx: the host nonzero %zu of %zu, the import base 0x%llx the memoryType %u the unwatched %d (no recorder: the device copy was not read)\n",
+                             static_cast<unsigned long long>(address), hostNonzero, probeBytes, static_cast<unsigned long long>(import->base), import->memoryType, import->unwatched ? 1 : 0);
+            }
+        } else if (import == nullptr) {
+            static std::mutex missingLock;
+            static std::set<std::uint64_t> reported;
+            std::lock_guard lock(missingLock);
+            if (reported.insert(address).second) {
+                std::fprintf(stderr, "[diag] the import content 0x%llx: no host import for the sampled surface\n", static_cast<unsigned long long>(address));
+            }
+        }
+    }
     // A storage image whose results for this surface (or for a mip chain containing it) are still on
     // the GPU supplies the texture by a view of it; anything else needs those results in guest
     // memory first.
@@ -702,6 +758,115 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         if (source != nullptr && IsRepackedTextureFormat(resource.format) && !Texture::CanRepackCopyFrom(*source, resource)) source.reset();
         static const bool rescan = std::getenv("APS5_NO_KEYS_RESCAN") == nullptr;
         if (rescan && source == nullptr) keys.reset();
+    }
+    // Mission 21: a periodic readback of a chosen surface (APS5_DIAG_FRAME_SURFACE), so the
+    // device image and the guest's own memory can be compared over time, not only at the
+    // first lookup. The guest's fraction is over the whole surface, the device's over its
+    // first 16x16 texels.
+    if (Aps5Diag::Enabled("APS5_DIAG_FRAME_SURFACE")) {
+        static const std::uint64_t wanted = [] {
+            const char* text = std::getenv("APS5_DIAG_FRAME_SURFACE");
+            return text != nullptr ? std::strtoull(text, nullptr, 0) : 0ull;
+        }();
+        if (wanted != 0 && address == wanted) {
+            static std::atomic<std::uint64_t> last{0};
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+            auto previous = last.load(std::memory_order_relaxed);
+            if (elapsed - previous >= 2000 && last.compare_exchange_strong(previous, elapsed)) {
+                std::size_t guestNonzero = 0;
+                std::size_t guestSampled = 0;
+                {
+                    const auto* data = reinterpret_cast<const std::uint32_t*>(address);
+                    const auto words = static_cast<std::size_t>(guestBytes / 4u);
+                    const auto step = std::max<std::uint64_t>(1, words / 4096u);
+                    for (std::uint64_t word = 0; word < words; word += step) {
+                        std::uint32_t value = 0;
+                        std::memcpy(&value, data + word, sizeof(value));
+                        if (value != 0) ++guestNonzero;
+                        ++guestSampled;
+                    }
+                }
+                std::fprintf(stderr, "[diag] the frame surface 0x%llx: the guest texels nonzero %zu of %zu (%.3f), the dcc %s at 0x%llx\n",
+                             static_cast<unsigned long long>(address), guestNonzero, guestSampled,
+                             guestSampled == 0 ? 0.0 : static_cast<double>(guestNonzero) / static_cast<double>(guestSampled),
+                             DccKeysName(TextureClearKeys(resource, guestBytes)),
+                             static_cast<unsigned long long>(resource.dccAddress));
+            }
+        }
+    }
+
+    // Mission 21: the storage image the sampled descriptor binds, read back after the detile
+    // recorded for it in this batch, against the guest's own texels and the DCC key claim over
+    // the surface. A surface whose keys say "cleared" while its texels hold data is served as the
+    // clear colour, not as the texels: the stale-claim case.
+    if (Aps5Diag::Enabled("APS5_DIAG_IMAGE_CONTENT") && source != nullptr) {
+        static std::mutex imageLock;
+        static std::set<std::uint64_t> probed;
+        bool probe = false;
+        {
+            std::lock_guard lock(imageLock);
+            probe = probed.insert(address).second;
+        }
+        if (probe) {
+            const auto format = StorageFormatForGuest(context, resource.format);
+            const auto elementBytes = BytesPerElement(resource.format);
+            const auto width = std::min<std::uint32_t>(resource.width, 16u);
+            const auto height = std::min<std::uint32_t>(resource.height, 16u);
+            const std::size_t bytes = static_cast<std::size_t>(width) * height * elementBytes;
+            auto* recorder = Recorder::Active();
+            if (recorder != nullptr && format != VK_FORMAT_UNDEFINED && width != 0 && height != 0 && bytes != 0) {
+                auto readback = std::make_shared<Buffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                const auto commands = recorder->Commands();
+                const auto image = source->Image();
+                VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                toTransfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toTransfer.image = image;
+                toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+                VkBufferImageCopy region{};
+                region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                region.imageExtent = {width, height, 1};
+                context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback->Handle(), 1, &region);
+                VkImageMemoryBarrier toGeneral = toTransfer;
+                toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                toGeneral.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+                toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+                recorder->Keep(readback, bytes);
+                // The guest's own texels over the whole surface, and the DCC key claim over it.
+                std::size_t guestNonzero = 0;
+                std::size_t guestSampled = 0;
+                {
+                    const auto* data = reinterpret_cast<const std::uint32_t*>(address);
+                    const auto words = static_cast<std::size_t>(guestBytes / 4u);
+                    const auto step = std::max<std::uint64_t>(1, words / 1024u);
+                    for (std::uint64_t word = 0; word < words; word += step) {
+                        std::uint32_t value = 0;
+                        std::memcpy(&value, data + word, sizeof(value));
+                        if (value != 0) ++guestNonzero;
+                        ++guestSampled;
+                    }
+                }
+                const auto keyClaim = TextureClearKeys(resource, guestBytes);
+                recorder->OnComplete([readback, address, bytes, elementBytes, width, height, guestBytes = guestBytes,
+                                      guestNonzero, guestSampled, dccAddress = resource.dccAddress, keyClaim] {
+                    const auto actual = readback->Bytes();
+                    std::size_t nonzero = 0;
+                    for (const auto byte : actual) if (byte != std::byte{0}) ++nonzero;
+                    std::fprintf(stderr, "[diag] the storage image 0x%llx %ux%u: the device nonzero %zu of %zu, the guest bytes %llu, the element %zu, the guest texels nonzero %zu of %zu, the dcc %s at 0x%llx\n",
+                                 static_cast<unsigned long long>(address), width, height, nonzero, bytes,
+                                 static_cast<unsigned long long>(guestBytes), elementBytes,
+                                 guestNonzero, guestSampled, DccKeysName(keyClaim), static_cast<unsigned long long>(dccAddress));
+                });
+            }
+        }
     }
     // Pages of the surface written since they were last collected are stamped now, before any
     // UnchangedSince (here and on a cache hit) looks at them: the checks only compare stamped blocks,
@@ -918,6 +1083,14 @@ StorageTextureCache& StorageTextures() {
 
 std::uint64_t storageCacheBytes() {
     return StorageTextures().bytes.load(std::memory_order_relaxed);
+}
+
+// Mission 4: the number of live storage-cache entries, i.e. how many distinct surface keys
+// are resident. Diagnostic read only; it does not change lookup, eviction or key semantics.
+std::uint64_t storageCacheEntries() {
+    auto& cache = StorageTextures();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    return static_cast<std::uint64_t>(cache.entries.size());
 }
 
 std::list<CachedStorageTexture>::iterator findStorage(StorageTextureCache& cache, const StorageKey& key) {
@@ -3982,6 +4155,23 @@ std::uint64_t ShaderResources::guestBufferBytes(std::span<const std::uint32_t> w
         const auto mappedEnd = RegisteredReadableEnd(address);
         if (mappedEnd <= address) byteSize = 0;
         else if (mappedEnd - address < context.limits.maxStorageBufferRange) byteSize = mappedEnd - address;
+    // Mission 21: the descriptor behind a large guest-buffer read, against the range the guest
+    // actually has registered there: a size the guest never had mapped is a decode error, and
+    // the copy of it is what the host cannot afford.
+    if (byteSize >= 64u * 1024u * 1024u) {
+        static std::mutex reportMutex;
+        static int reports = 0;
+        std::lock_guard lock(reportMutex);
+        if (reports < 12) {
+            ++reports;
+            const auto mappedEnd = RegisteredReadableEnd(address);
+            std::fprintf(stderr, "[diag] a large guest-buffer read: the address 0x%llx, the size %llu (0x%llx), the stride %u, the records %u, the mapped end 0x%llx, the mapped bytes %llu\n",
+                         static_cast<unsigned long long>(address), static_cast<unsigned long long>(byteSize),
+                         static_cast<unsigned long long>(byteSize), descriptor.Stride(), descriptor.NumRecords(),
+                         static_cast<unsigned long long>(mappedEnd),
+                         static_cast<unsigned long long>(mappedEnd > address ? mappedEnd - address : 0ull));
+        }
+    }
     }
     if (byteSize == 0 || address == 0) return 0;
     if (const std::uint64_t stride = descriptor.Stride(); stride != 0 && byteSize <= context.limits.maxStorageBufferRange) {
@@ -4428,6 +4618,24 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             const auto* record = nextRecord();
             if (IsNullTextureResource(words)) {
+                // Mission 21: a guest image descriptor that decodes as null is bound as a null
+                // image and leaves no trace in the described ranges: the shader then samples
+                // nothing. The words are logged so a wrongly-decoded descriptor is visible.
+                {
+                    static std::mutex nullLock;
+                    static std::set<std::uint64_t> reported;
+                    std::lock_guard lock(nullLock);
+                    if (reported.size() < 64) {
+                        char text[256];
+                        std::snprintf(text, sizeof(text),
+                                      "[diag] a null image descriptor: %08x %08x %08x %08x %08x %08x %08x %08x",
+                                      words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+                        if (reported.insert(words[0] | (static_cast<std::uint64_t>(words[1]) << 32u)).second) {
+                            std::fprintf(stderr, "%s\n", text);
+                        }
+                    }
+                }
+                ++nullImageDescriptors;
                 item.imageAllocations.push_back(std::numeric_limits<std::size_t>::max());
                 --plannedSampledImages;
                 continue;
@@ -4507,7 +4715,10 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
         const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
         const bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
         if (binding.imageShape.has_value() && !firstLayer && !MatchesGuestDimension(*binding.imageShape, resource.dimension)) throw std::runtime_error("AGC graphics: guest storage texture dimension disagrees with the shader's declared image shape (shape " + std::to_string(static_cast<int>(*binding.imageShape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
-        if (resource.dimension == TextureDimension::k2DMsaa) {
+        // Mission 21: the title's multisample target and its single-sample surface share the
+        // address it gave them, so a storage descriptor that names that address addresses
+        // the target even when it declares one sample.
+        if (resource.dimension == TextureDimension::k2DMsaa || MultisampleTargetCovers(context, resource.baseAddress)) {
             Require(!(element < binding.imageAtomic.size() && binding.imageAtomic[element]) && !(element < binding.imageAtomic64.size() && binding.imageAtomic64[element]), "storage image atomics on a multisampled texture are not implemented");
             storageTextures.push_back(nullptr);
             multisampleStorageViews.resize(storageTextures.size(), VK_NULL_HANDLE);

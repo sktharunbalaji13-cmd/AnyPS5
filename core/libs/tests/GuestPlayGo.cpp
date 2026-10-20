@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 extern "C" {
 int APS5_VABI scePlayGoInitialize(const PlayGoInitParams*);
@@ -71,7 +72,15 @@ static int CheckScenarioWithoutChunkTable(const char* root) {
     const PlayGoToDo todo[2] = {{0, 3, 0}, {0xFFFF, 3, 0}};
     Require(scePlayGoSetToDoList(handle, todo, 2) == 0);
     std::uint32_t chunkCount = 0;
-    Require(scePlayGoGetChunkId(handle, nullptr, 0, &chunkCount) == 0 && chunkCount == 1);
+    Require(scePlayGoGetChunkId(handle, nullptr, 0, &chunkCount) == 0 && chunkCount == 1000);
+    std::vector<std::uint16_t> ids(chunkCount + 1, 0xFFFF);
+    Require(scePlayGoGetChunkId(handle, ids.data(), static_cast<std::uint32_t>(ids.size()), &chunkCount) == 0 && chunkCount == 1000);
+    for (std::uint32_t index = 0; index < chunkCount; ++index) Require(ids[index] == index);
+    std::vector<std::int8_t> listedLoci(chunkCount, 0);
+    Require(scePlayGoGetLocus(handle, ids.data(), chunkCount, listedLoci.data()) == 0);
+    for (const auto locus : listedLoci) Require(locus == 3);
+    std::uint16_t firstTwo[2] = {0xFFFF, 0xFFFF};
+    Require(scePlayGoGetChunkId(handle, firstTwo, 2, &chunkCount) == 0 && chunkCount == 2 && firstTwo[0] == 0 && firstTwo[1] == 1);
     Require(scePlayGoClose(handle) == 0);
     return 0;
 }
@@ -212,6 +221,56 @@ static void RunLayout(const char* self, const char* mode, std::initializer_list<
     Require(status == 0);
 }
 
+static void SetPlayGoDiagnostics() {
+#ifdef _WIN32
+    Require(_putenv_s("APS5_DIAG_PLAYGO", "1") == 0);
+#else
+    Require(setenv("APS5_DIAG_PLAYGO", "1", 1) == 0);
+#endif
+}
+
+// Mission 3: with the diagnostic channel enabled, the observable PlayGo results must be
+// identical to the undiagnosed results, and the bounded sampling must never read or write
+// past what the API itself wrote.
+static int CheckScenarioOnlyWithDiagnostics(const char* root) {
+    SetPlayGoDiagnostics();
+    std::filesystem::current_path(root);
+    PlayGoInitParams init{};
+    int handle = 0;
+    Require(scePlayGoInitialize(&init) == 0);
+    Require(scePlayGoOpen(&handle, nullptr) == 0);
+
+    const std::uint16_t anyIds[3] = {1, 10, 0xFFFF};
+    std::int8_t loci[3] = {0, 0, 0};
+    Require(scePlayGoGetLocus(handle, anyIds, 3, loci) == 0 && loci[0] == 3 && loci[1] == 3 && loci[2] == 3);
+
+    std::uint32_t count = 0;
+    Require(scePlayGoGetChunkId(handle, nullptr, 0, &count) == 0 && count == 1000);
+
+    std::uint16_t listed[10];
+    for (auto& entry : listed) entry = 0xAAAA;
+    std::uint32_t written = 0;
+    Require(scePlayGoGetChunkId(handle, listed, 8, &written) == 0 && written == 8);
+    for (std::uint32_t index = 0; index < written; ++index) Require(listed[index] == index);
+    Require(listed[8] == 0xAAAA && listed[9] == 0xAAAA);
+
+    std::uint16_t single[1] = {0xBBBB};
+    std::uint32_t none = 7;
+    Require(scePlayGoGetChunkId(handle, single, 0, &none) == 0 && none == 0);
+    Require(single[0] == 0xBBBB);
+
+    const PlayGoToDo todo[2] = {{0, 3, 0}, {0xFFFF, 3, 0}};
+    Require(scePlayGoSetToDoList(handle, todo, 2) == 0);
+    std::uint32_t todoEntries = 5;
+    Require(scePlayGoGetToDoList(handle, nullptr, 0, &todoEntries) == 0 && todoEntries == 0);
+    PlayGoOptionalChunk option{};
+    Require(scePlayGoGetSupportedOptionalChunk(handle, 0, &option) == 0 && option.bitmask == ~0ull);
+    std::uint64_t mask = 0;
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
+    Require(scePlayGoClose(handle) == 0);
+    return 0;
+}
+
 static std::string ChunkTableFile() {
     std::string header(0x100, '\0');
     header.replace(0, 4, "plgx");
@@ -228,6 +287,7 @@ int main(int argc, char** argv) {
         if (mode == "--no-file-unknown-answer") return CheckUnknownUnlistedChunkAnswer(argv[2]);
         if (mode == "--package-chunk-table" || mode == "--scenario-with-chunk-table") return CheckPackageChunkTable(argv[2]);
         if (mode == "--scenario-only") return CheckScenarioWithoutChunkTable(argv[2]);
+        if (mode == "--scenario-only-diagnostics") return CheckScenarioOnlyWithDiagnostics(argv[2]);
         if (mode == "--ficm-only") return CheckRejectedLayout(argv[2], "playgo-ficm.dat");
         if (mode == "--hash-table-only") return CheckRejectedLayout(argv[2], "playgo-hash-table.dat");
         if (mode == "--invalid-chunk-table") return CheckRejectedLayout(argv[2], "playgo-chunk.dat");
@@ -239,6 +299,7 @@ int main(int argc, char** argv) {
     RunLayout(argv[0], "--package-chunk-table", {{"playgo-chunk.dat", ChunkTableFile()}});
     RunLayout(argv[0], "--scenario-with-chunk-table", {{"playgo-chunk.dat", ChunkTableFile()}, {"playgo-scenario.json", "{}"}});
     RunLayout(argv[0], "--scenario-only", {{"playgo-scenario.json", "{}"}});
+    RunLayout(argv[0], "--scenario-only-diagnostics", {{"playgo-scenario.json", "{}"}});
     RunLayout(argv[0], "--ficm-only", {{"playgo-ficm.dat", "x"}});
     RunLayout(argv[0], "--hash-table-only", {{"playgo-hash-table.dat", "x"}});
     RunLayout(argv[0], "--invalid-chunk-table", {{"playgo-chunk.dat", "not a chunk table"}});

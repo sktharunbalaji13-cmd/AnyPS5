@@ -195,7 +195,30 @@ namespace {
 
 void AwaitRegisteredPreparation(PreparedShaders& prepared, std::unique_lock<std::mutex>& lock) {
     if (prepared.pending) PrioritizeRegistrationPreparation(prepared);
-    prepared.settled.wait(lock, [&] { return !prepared.pending; });
+    if (!prepared.pending) {
+        if (prepared.failure != nullptr) std::rethrow_exception(prepared.failure);
+        return;
+    }
+    // The background preparation runs on a pool worker and needs the GPU mutex (the prepared
+    // artifact is a device object). The caller of this wait is usually the draw thread, which
+    // holds the GPU mutex: it would wait for the worker, and the worker would wait for the
+    // mutex the waiter holds. Release the mutex around the wait, exactly as the flush hook's
+    // wait does (Recorder::SyncThrough -> syncThroughUnlocked). Only the outermost acquisition
+    // on this thread is released, so a caller that holds the mutex for its own reasons keeps it.
+    const auto depth = GuestMemory::GpuMutex().DepthOnThisThread();
+    const bool released = depth == 1;
+    if (released) GuestMemory::GpuMutex().unlock();
+    // The report is from inside the wait, after a timeout: it shows the pool's state at the
+    // moment the wait is stuck, which is what distinguishes "the pool has no workers" from
+    // "the workers are wedged" and from "the workers are busy".
+    bool reported = false;
+    while (!prepared.settled.wait_for(lock, std::chrono::milliseconds(500), [&] { return !prepared.pending; })) {
+        if (!reported) {
+            reported = true;
+            ReportPreparationWait(prepared);
+        }
+    }
+    if (released) GuestMemory::GpuMutex().lock();
     if (prepared.failure != nullptr) std::rethrow_exception(prepared.failure);
 }
 
@@ -293,6 +316,13 @@ struct ShaderPreparationTransaction::State {
     void Hold() {
         if (!lock.owns_lock()) lock.lock();
     }
+
+    // Release the writers mutex around a wait for the background preparation, so the pool
+    // worker can publish its result. The transaction's own state is not read or written while
+    // the mutex is released.
+    void Release() {
+        if (lock.owns_lock()) lock.unlock();
+    }
 };
 
 std::mutex ShaderPreparationTransaction::State::writers;
@@ -321,7 +351,14 @@ PreparedShaderState& ShaderPreparationTransaction::Edit(const ShaderSnapshot& sn
         return found->second.prepared;
     }
     std::unique_lock lock(snapshot.prepared->mutex);
+    // The wait below is for the background preparation, which the pool worker publishes through
+    // this same transaction's writers mutex. Holding the writers mutex across the wait would
+    // keep the worker out of Commit, so it is released around the wait (and the GPU mutex with
+    // it: the worker prepares device objects). The transaction's own state is not touched by the
+    // wait, so no other thread can change it meanwhile.
+    root->Release();
     AwaitRegisteredPreparation(*snapshot.prepared, lock);
+    root->Hold();
     return changes.emplace(snapshot.prepared.get(), State::Change{snapshot.prepared, *snapshot.prepared, true, snapshot.prepared->entries.size(), snapshot.prepared->registeredAbis.size()}).first->second.prepared;
 }
 
@@ -332,7 +369,9 @@ const PreparedShaderState& ShaderPreparationTransaction::Read(const ShaderSnapsh
     const auto found = changes.find(snapshot.prepared.get());
     if (found != changes.end()) return found->second.prepared;
     std::unique_lock lock(snapshot.prepared->mutex);
+    root->Release();
     AwaitRegisteredPreparation(*snapshot.prepared, lock);
+    root->Hold();
     return changes.emplace(snapshot.prepared.get(), State::Change{snapshot.prepared, *snapshot.prepared, false, snapshot.prepared->entries.size(), snapshot.prepared->registeredAbis.size()}).first->second.prepared;
 }
 
@@ -579,13 +618,20 @@ std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const Shad
     struct PreparedKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
     ShaderRecompiler::BuildPreparedShaderKey(request, key);
-    std::unique_lock lock(snapshot.prepared->mutex);
-    AwaitRegisteredPreparation(*snapshot.prepared, lock);
-    for (const auto& entry : snapshot.prepared->entries) {
-        if (entry.codeOffset == codeOffset && ShaderRecompiler::MatchesPreparedShader(request, *entry.handle, key)) return entry.handle;
+    {
+        std::unique_lock lock(snapshot.prepared->mutex);
+        AwaitRegisteredPreparation(*snapshot.prepared, lock);
+        for (const auto& entry : snapshot.prepared->entries) {
+            if (entry.codeOffset == codeOffset && ShaderRecompiler::MatchesPreparedShader(request, *entry.handle, key)) return entry.handle;
+        }
     }
+    // The compile runs without the prepared state's mutex: it is the longest operation here,
+    // and holding the mutex across it keeps the registering thread (which takes that mutex in
+    // Commit, while it holds the driver's mutex) out, and the draw thread (which takes the
+    // driver's mutex) out in turn.
     ReportPreparedAtUse(snapshot, request);
     auto handle = PrepareShaderWithDiagnostics(request);
+    std::lock_guard lock(snapshot.prepared->mutex);
     snapshot.prepared->entries.push_back({codeOffset, handle});
     return handle;
 }
@@ -727,26 +773,35 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
         source.shader.code = linked.code;
         source.context.linkedCallFallbacks = linked.fallbacks;
     }
-    std::unique_lock lock(snapshot.prepared->mutex);
-    AwaitRegisteredPreparation(*snapshot.prepared, lock);
-    if (std::ranges::find(snapshot.prepared->convertedSamples, codeOffset) != snapshot.prepared->convertedSamples.end()) source.context.convertedSamples = true;
+    {
+        std::unique_lock lock(snapshot.prepared->mutex);
+        AwaitRegisteredPreparation(*snapshot.prepared, lock);
+        if (std::ranges::find(snapshot.prepared->convertedSamples, codeOffset) != snapshot.prepared->convertedSamples.end()) source.context.convertedSamples = true;
+        auto invocationRequest = source;
+        struct PreparedKeyStorage {};
+        auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
+        ShaderRecompiler::BuildPreparedShaderKey(source, key);
+        for (const auto& entry : snapshot.prepared->entries) {
+            if (entry.codeOffset != codeOffset) continue;
+            invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*entry.handle);
+            if (!linked.code.empty() && !std::ranges::equal(invocationRequest.shader.code, linked.code)) continue;
+            if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, entry.handle, key)) return std::move(*invocation);
+        }
+    }
+    // The compile runs without the prepared state's mutex (see SourceHandleFor).
+    ReportPreparedAtUse(snapshot, source);
+    auto handle = PrepareShaderWithDiagnostics(source);
     auto invocationRequest = source;
+    invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*handle);
     struct PreparedKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
     ShaderRecompiler::BuildPreparedShaderKey(source, key);
-    for (const auto& entry : snapshot.prepared->entries) {
-        if (entry.codeOffset != codeOffset) continue;
-        invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*entry.handle);
-        if (!linked.code.empty() && !std::ranges::equal(invocationRequest.shader.code, linked.code)) continue;
-        if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, entry.handle, key)) return std::move(*invocation);
-    }
-    ReportPreparedAtUse(snapshot, source);
-    auto handle = PrepareShaderWithDiagnostics(source);
-    invocationRequest = source;
-    invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*handle);
     auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, handle, key);
     if (!invocation.has_value()) throw std::runtime_error("AGC driver: an artifact prepared at use does not match its invocation");
-    snapshot.prepared->entries.push_back({codeOffset, std::move(handle)});
+    {
+        std::lock_guard lock(snapshot.prepared->mutex);
+        snapshot.prepared->entries.push_back({codeOffset, std::move(handle)});
+    }
     return std::move(*invocation);
 }
 
@@ -1032,8 +1087,8 @@ void DeferPipelineStage(PreparedShaderState& prepared, const ShaderSnapshot& sna
 }
 
 std::optional<std::string> FailedRegistration(const ShaderSnapshot& snapshot) {
-    std::unique_lock lock(snapshot.prepared->mutex);
     try {
+        std::unique_lock lock(snapshot.prepared->mutex);
         AwaitRegisteredPreparation(*snapshot.prepared, lock);
     } catch (const std::exception& error) {
         return error.what();
@@ -1094,6 +1149,24 @@ public:
         return liveWorkers.load(std::memory_order_acquire);
     }
 
+    // The pool's state, for the diagnostic that reports a preparation wait that never ends.
+    unsigned LiveWorkerCount() {
+        std::lock_guard lock(mutex);
+        return threads;
+    }
+    std::size_t QueuedTasks() {
+        std::lock_guard lock(mutex);
+        return tasks.size();
+    }
+    unsigned RunningTasks() {
+        std::lock_guard lock(mutex);
+        return running;
+    }
+    std::size_t UnfinishedTasks() {
+        std::lock_guard lock(mutex);
+        return unfinished.size();
+    }
+
     static void CloseAll() {
         std::array<RegistrationPreparePool*, 2> pools{};
         {
@@ -1133,6 +1206,16 @@ public:
         {
             std::unique_lock lock(mutex);
             if (threads != 0 && !closed) {
+                // A worker that died leaves the queue with a task nobody will run: the thread
+                // that waits for its preparation waits forever. The worker count is checked
+                // against the live workers, and a task is run here when none is left.
+                if (liveWorkers.load(std::memory_order_acquire) == 0) {
+                    ++deadWorkers;
+                    lock.unlock();
+                    std::fprintf(stderr, "[shader-prepare] the preparation pool has no live worker: the task runs on this thread\n");
+                    task();
+                    return;
+                }
                 const auto sequence = ++submitted;
                 if (prepared != nullptr && prepared->demanded.load()) tasks.push_front({std::move(task), prepared, sequence});
                 else tasks.push_back({std::move(task), prepared, sequence});
@@ -1157,6 +1240,12 @@ public:
         std::unique_lock lock(mutex);
         const auto ticket = submitted;
         idle.wait(lock, [&] { return unfinished.empty() || *unfinished.begin() > ticket; });
+    }
+
+    // The number of preparations still queued or running, for the diagnostic.
+    std::size_t Pending() {
+        std::lock_guard lock(mutex);
+        return tasks.size() + unfinished.size();
     }
 
     void Close() {
@@ -1206,7 +1295,17 @@ private:
                 ++pool.running;
             }
             const auto sequence = task.sequence;
-            task.function();
+            // The task must not take the worker down with it: a worker that dies is never
+            // replaced, and a task queued with no live worker is never run, so the thread that
+            // waits for its preparation waits forever. The failure is reported and the worker
+            // goes back to the queue.
+            try {
+                task.function();
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[shader-prepare] a preparation task failed: %s\n", error.what());
+            } catch (...) {
+                std::fprintf(stderr, "[shader-prepare] a preparation task failed with an unknown exception\n");
+            }
             task = {};
             bool drained = false;
             {
@@ -1235,6 +1334,7 @@ private:
     std::deque<Task> tasks;
     std::vector<pthread_t> workers;
     unsigned threads = 0;
+    unsigned deadWorkers = 0;
     inline static std::atomic<unsigned> liveWorkers{0};
     unsigned running = 0;
     std::uint64_t submitted = 0;
@@ -1285,7 +1385,28 @@ void PrioritizeRegistrationPreparation(PreparedShaders& prepared) {
 }
 
 void AwaitRegistrationPreparation() {
-    if (auto* pool = RegistrationPreparePool::Existing()) pool->AwaitSubmitted();
+    auto* pool = RegistrationPreparePool::Existing();
+    if (pool == nullptr) return;
+    static const bool report = std::getenv("APS5_REPORT_DRIVER_LOCK") != nullptr;
+    if (report) {
+        const auto pending = pool->Pending();
+        if (pending != 0) std::fprintf(stderr, "[shader-prepare] waiting for %zu preparations to finish\n", pending);
+    }
+    pool->AwaitSubmitted();
+}
+
+void ReportPreparationWait(const PreparedShaders& prepared) {
+    static std::mutex reportMutex;
+    static std::set<const PreparedShaders*> reported;
+    std::lock_guard lock(reportMutex);
+    if (!reported.insert(&prepared).second) return;
+    auto* pool = RegistrationPreparePool::Existing();
+    std::fprintf(stderr, "[shader-prepare] the wait for %p: the pool has %u workers, %zu queued tasks, %u running, %zu unfinished\n",
+                 static_cast<const void*>(&prepared),
+                 pool != nullptr ? pool->LiveWorkerCount() : 0u,
+                 pool != nullptr ? pool->QueuedTasks() : 0u,
+                 pool != nullptr ? pool->RunningTasks() : 0u,
+                 pool != nullptr ? pool->UnfinishedTasks() : 0u);
 }
 
 void SubmitLibraryPrebuild(std::function<void()> task) {
@@ -1607,7 +1728,30 @@ void Driver::ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::
 void Driver::SettleShaderPreparations(std::span<const Shader* const> stages) {
     std::vector<std::shared_ptr<const ShaderSnapshot>> snapshots;
     {
-        std::lock_guard lock(mutex);
+        // The driver's mutex is taken here and released before the preparation wait. A wait
+        // on it that lasts is the sign of the inversion against the registration path (which
+        // holds it across the publish), so it is reported.
+        static const bool report = std::getenv("APS5_REPORT_DRIVER_LOCK") != nullptr;
+        std::unique_lock lock(mutex, std::defer_lock);
+        if (report && !lock.try_lock()) {
+            static std::mutex reportMutex;
+            static std::set<std::thread::id> reported;
+            bool first = false;
+            {
+                std::lock_guard reportLock(reportMutex);
+                first = reported.insert(std::this_thread::get_id()).second;
+            }
+            if (first) {
+                // The holder is the thread that took the mutex last: the driver's mutex is
+                // instrumented to remember the site that took it. The site is printed as the
+                // module-relative offset, the form the thread sampler uses.
+                const auto site = Driver::MutexHolderSite();
+                const auto offset = site != nullptr ? GuestMemory::CodeOffset(site) : 0u;
+                std::fprintf(stderr, "[shader-prepare] the driver's mutex is held by another thread (last taken at libSceAgcDriver.prx 0x%llx); this thread waits for it\n",
+                             static_cast<unsigned long long>(offset));
+            }
+            lock.lock();
+        }
         if (shaders == nullptr) return;
         for (const auto* shader : stages) {
             if (shader == nullptr) continue;
@@ -1711,6 +1855,11 @@ ShaderSnapshot PrepareNullPixelProgram(const VulkanDevice& device) {
     return null;
 }
 
+const void*& Driver::MutexHolderSite() {
+    static const void* site = nullptr;
+    return site;
+}
+
 std::shared_ptr<const ShaderRegistry> Driver::RegisteredShaders() {
     std::lock_guard lock(mutex);
     return shaders;
@@ -1741,6 +1890,7 @@ void Driver::RegisterShader(const Shader* shader) {
     transaction.Hold();
     {
         std::lock_guard lock(mutex);
+        MutexHolderSite() = __builtin_return_address(0);
         rethrowFailure();
         if (shaders != nullptr) {
             const auto found = shaders->find(snapshot.codeAddress);

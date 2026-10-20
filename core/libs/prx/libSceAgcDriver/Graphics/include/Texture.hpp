@@ -339,6 +339,13 @@ public:
     // False, naming why, when the copy must be a transfer.
     bool CopyFrom(StorageTexture& source, const char*& refusal);
     VkImage Image() const { return image; }
+    // Mission 5: a stable creation identity for this image, unique among live images and
+    // never reused. The guest address is not an identity (it is reused), and neither
+    // Version() (a content counter) nor Generation() (a memory stamp) is one.
+    std::uint64_t Id() const { return id; }
+    // Mission 6: the format the image itself is created with (the storage format), which is
+    // what a read-back copy would return. The attachment view may use another format.
+    VkFormat StorageFormat() const { return storageFormat; }
     const GuestTextureResource& Descriptor() const { return descriptor; }
     std::uint32_t ImageLayers() const { return geometry.imageLayers; }
     std::uint32_t ImageDepth() const { return geometry.imageDepth; }
@@ -608,6 +615,8 @@ private:
     // Results are on the GPU only (guarded by the pending-write registry lock).
     bool dirty = false;
     std::uint64_t version = 0;
+    // Mission 5: stable creation identity (see Id()).
+    std::uint64_t id = 0;
     // `original` holds the guest bytes; false after a GPU-side clear, which never read them.
     std::vector<bool> layerOriginal;
     std::map<std::uint64_t, std::uint64_t> keptAtUnwatch;

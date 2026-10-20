@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FrameDumpIo.hpp"
+#include "prx/libSceAgcDriver/Execution/include/FrameDumpSchedule.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "BdaAbi.hpp"
@@ -342,6 +343,8 @@ struct VulkanDevice::State {
     bool depthBiasClamp = false;
     bool dualSrcBlend = false;
     bool occlusionQueryPrecise = false;
+    // Mission 7: the device was created with the pipeline-statistics query feature.
+    bool pipelineStatisticsQuery = false;
     VkDeviceSize hostImportAlignment = 0;
     bool dmaBufImport = false;
     bool sparseBinding = false;
@@ -1629,6 +1632,19 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     state->dualSrcBlend = enabled.dualSrcBlend == VK_TRUE;
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
+    // Mission 7: the pipeline-statistics query feature is requested only when the diagnostic
+    // is switched on, so the default device configuration is unchanged.
+    {
+        const auto statistics = std::getenv("APS5_DIAG_PIPELINE_STATS");
+        const bool wantStatistics = statistics != nullptr && std::string_view(statistics) == "1";
+        if (wantStatistics && available.pipelineStatisticsQuery) {
+            enabled.pipelineStatisticsQuery = VK_TRUE;
+            state->pipelineStatisticsQuery = true;
+            std::fprintf(stderr, "[gpu] pipeline statistics queries enabled (diagnostic)\n");
+        } else if (wantStatistics) {
+            std::fprintf(stderr, "[gpu] pipeline statistics queries are not supported by this device\n");
+        }
+    }
     // Recompiled storage-image access declares no format (the guest descriptor decides it).
     enabled.shaderStorageImageMultisample = available.shaderStorageImageMultisample;
     state->storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
@@ -2240,8 +2256,18 @@ int VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::by
     if (recorder.Idle()) return 1;
     static const bool drain = std::getenv("APS5_DRAIN_COMPLETION_LABELS") != nullptr;
     const auto context = graphicsContext();
+    // A range with no host import cannot take the store on the GPU. The store is written into
+    // guest memory on the CPU instead (reason 1), after the recorder's work has been synced so
+    // the value does not appear before the work that precedes it. Returning reason 3 here would
+    // drop the store, and a guest waiting on that address in a WAIT_REG_MEM would never be
+    // released. Upstream PR #7464.
+    const auto unimported = [&] {
+        recorder.Sync();
+        return 1;
+    };
+    if (!Graphics::HostImportCovers(context, address, bytes.size())) return unimported();
     const auto* import = Graphics::HostImportFor(context, address, bytes.size());
-    if (import == nullptr) return 3;
+    if (import == nullptr) return unimported();
     // A unit shadow's results in the label's unit reach the import before the store lands over
     // part of it (the store's stamp then makes the unit stale); the deferred label paths call no
     // FlushPending of their own.
@@ -3031,6 +3057,10 @@ struct FrameDumps {
     int every = 1;
     int dumped = 0;
     std::uint64_t presents = 0;
+    // Mission 4: opt-in capture times in seconds. When the list is not empty it replaces the
+    // count/spacing rule, so a run captures at most one frame per listed time.
+    std::vector<double> at;
+    std::size_t nextAt = 0;
 };
 
 FrameDumps& Dumps() {
@@ -3040,8 +3070,25 @@ FrameDumps& Dumps() {
     }(), std::getenv("APS5_NO_GPU_DUMP") != nullptr, [] {
         const char* value = std::getenv("APS5_DUMP_FRAMES_EVERY");
         return value ? std::max(std::atoi(value), 1) : 1;
-    }()};
+    }(), 0, 0, AgcDriver::ParseDumpTimes(std::getenv("APS5_DUMP_FRAMES_AT")), 0};
     return dumps;
+}
+
+// Seconds since the first dump decision, used by the APS5_DUMP_FRAMES_AT schedule.
+double FrameDumpElapsedSeconds() {
+    static const auto started = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+}
+
+// True when the present in progress should be captured. Without a time schedule this is the
+// existing count/spacing rule, unchanged; with one it is the time schedule alone.
+bool DumpDueNow(FrameDumps& dumps) {
+    if (!frameDumpOutput.Enabled_nid_no_patch() || dumps.dumped >= dumps.limit) return false;
+    if (!dumps.at.empty()) {
+        ++dumps.presents;
+        return AgcDriver::DumpDue(dumps.at, FrameDumpElapsedSeconds(), dumps.nextAt);
+    }
+    return (++dumps.presents % static_cast<std::uint64_t>(dumps.every)) == 0;
 }
 
 }
@@ -3057,7 +3104,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         if (passthrough) ensureHdrScaler(DisplayTexelFormat(buffer.pixelFormat));
         const auto pixels = passthrough ? ReadDisplayBufferTexels(buffer) : ReadDisplayBuffer(buffer);
         bool dumpFrame = false;
-        if (frameDumpOutput.Enabled_nid_no_patch() && dumps.dumped < dumps.limit && ++dumps.presents % static_cast<std::uint64_t>(dumps.every) == 0) {
+        if (DumpDueNow(dumps)) {
             if (passthrough) {
                 WriteFrameBmp(dumps.dumped++, buffer.width, buffer.height, ReadDisplayBuffer(buffer), DumpScale());
             } else if (dumps.cpu) {
@@ -3113,8 +3160,25 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         }
     }
     const auto cleared = buffer.dccAddress != 0 && resident == nullptr ? CompressedClearPixel(buffer, bytes) : std::nullopt;
+    // Mission 5: the target-to-presentation mapping. The present path resolves its source from
+    // the pending registry by guest address, while a draw resolves its target from the storage
+    // cache by surface key; the two meet only through the guest address. This records the
+    // relationship explicitly instead of assuming it.
+    if (Aps5Diag::Enabled("APS5_DIAG_TARGET")) {
+        const auto residentId = resident != nullptr ? resident->Id() : 0ull;
+        const auto residentAddress = resident != nullptr ? resident->Descriptor().baseAddress : 0ull;
+        const bool sameSurface = resident != nullptr && residentAddress == buffer.address;
+        Aps5Diag::Event("present-map", "display_addr=0x%llx %ux%u resident_id=%llu resident_addr=0x%llx resident_extent=%ux%u path=%s same_surface=%d",
+                        static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height,
+                        static_cast<unsigned long long>(residentId),
+                        static_cast<unsigned long long>(residentAddress),
+                        resident != nullptr ? resident->Descriptor().width : 0,
+                        resident != nullptr ? resident->Descriptor().height : 0,
+                        resident == nullptr ? "guest-memory" : (convert ? "convert" : "blit"),
+                        sameSurface ? 1 : 0);
+    }
     bool dumpFrame = false;
-    if (frameDumpOutput.Enabled_nid_no_patch() && dumps.dumped < dumps.limit && ++dumps.presents % static_cast<std::uint64_t>(dumps.every) == 0) {
+    if (DumpDueNow(dumps)) {
         if (dumps.cpu || (passthrough && resident == nullptr)) {
             auto full = cleared ? std::vector<std::byte>(static_cast<std::size_t>(buffer.width) * buffer.height * cleared->size()) : ReadDisplayBuffer(buffer);
             for (std::size_t offset = 0; cleared && offset < full.size(); offset += cleared->size()) std::memcpy(full.data() + offset, cleared->data(), cleared->size());
@@ -3342,6 +3406,13 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             } else {
                 scaler->RecordReadback(commands, slot.dumpBuffer->Handle());
             }
+            // Mission 4: one bounded diagnostic record per capture, tying the captured image to
+            // the present, the swapchain image and the newest submitted command batch.
+            Aps5Diag::Event("frame", "dump=%d present=%llu image=%u batch=%llu slot=%zu width=%u height=%u scale=%u elapsed=%.3f stage=%s",
+                            state->nextDumpIndex, static_cast<unsigned long long>(presentCounters.presents + 1), index,
+                            static_cast<unsigned long long>(batchesAtBlit), state->presentCursor, slot.dumpWidth,
+                            slot.dumpHeight, scale, FrameDumpElapsedSeconds(),
+                            drawn ? "presentation-pass" : (direct ? "resident-blit" : "scaler-readback"));
         }
         if (resident != nullptr) {
             residentBarrier.srcAccessMask = residentRead;
@@ -3682,6 +3753,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.provokingVertexModePerPipeline = state->provokingVertexModePerPipeline;
     context.drawIndirectCount = state->drawIndirectCount;
     context.occlusionQueryPrecise = state->occlusionQueryPrecise;
+    context.pipelineStatisticsQuery = state->pipelineStatisticsQuery;
     context.emptyBuffer = state->emptyBuffer ? state->emptyBuffer->Handle() : VK_NULL_HANDLE;
     context.copiedWriters = state->copiedWriters.get();
     context.functions = state->functionsReady ? &state->deviceFunctions : nullptr;
@@ -4624,6 +4696,16 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
         recorder.Keep(record.bindings);
         for (const auto& snapshot : record.bindings->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     }
+    // Mission 21: the dispatch's own sampled ranges with their content and DCC claim, so the
+    // compute pass that produces the black frame can be correlated with what it read. Bounded:
+    // the first few dispatches only (the description samples every bound range on the CPU).
+    {
+        static std::atomic<std::uint64_t> described{0};
+        if (described.fetch_add(1) < 4) {
+            Aps5Diag::Event("dispatch-inputs", "groups=%ux%ux%u %s",
+                            record.x, record.y, record.z, resources.Describe().c_str());
+        }
+    }
     recordStep(PhaseRecordKeeps);
     if (record.dataRefresh != RecordedDispatch::DataRefresh::None) {
         // The template's data buffers take this dispatch's words: a transfer write the pre-dispatch
@@ -4866,7 +4948,26 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::computePipeline(const Grap
             if (const auto pending = state->computePipelinesBuilding.find(pipelineKey); pending != state->computePipelinesBuilding.end()) other = pending->second;
             else state->computePipelinesBuilding.emplace(pipelineKey, building.get_future().share());
         }
-        if (other.valid()) return other.get();
+        if (other.valid()) {
+            // Another thread is building this pipeline. Waiting for it here must not hold the
+            // GPU mutex: the builder needs it to create the pipeline, so the wait would
+            // deadlock against it (the builder waits for the mutex, this thread waits for the
+            // builder). The mutex is released around the wait, exactly as the flush hook's wait
+            // does (Recorder::syncThroughUnlocked).
+            const auto depth = GuestMemory::GpuMutex().DepthOnThisThread();
+            const bool released = depth == 1;
+            if (released) GuestMemory::GpuMutex().unlock();
+            std::shared_ptr<ComputePipelineObjects> built;
+            std::exception_ptr error;
+            try {
+                built = other.get();
+            } catch (...) {
+                error = std::current_exception();
+            }
+            if (released) GuestMemory::GpuMutex().lock();
+            if (error != nullptr) std::rethrow_exception(error);
+            return built;
+        }
     }
     const auto finish = [&](std::shared_ptr<ComputePipelineObjects> built, std::exception_ptr error) {
         if (pipelineKey.identity.Empty()) return built;

@@ -10,6 +10,9 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <prx/libc/include/general/DiagTrace.hpp>
+#include <prx/libc/include/general/PcmStats.hpp>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
@@ -18,6 +21,18 @@
 #include "AudioOutShutdown.hpp"
 #include "prx/libSceAudioOut/include/AudioOutSdl.hpp"
 #include "prx/libScePad/include/PadState.hpp"
+
+// Mission 6: the audio diagnostics are opt-in and cost one cached boolean test when off.
+namespace {
+bool AudioDiagnostics() {
+    static const bool on = Aps5Diag::Enabled("APS5_DIAG_AUDIO");
+    return on;
+}
+} // namespace
+
+#define APS5_AUDIO_EVENT(...) do { if (AudioDiagnostics()) Aps5Diag::Event(__VA_ARGS__); } while (0)
+#define APS5_AUDIO_FAILURE(...) do { if (AudioDiagnostics()) Aps5Diag::Failure(__VA_ARGS__); } while (0)
+
 
 using Clock = std::chrono::steady_clock;
 
@@ -120,10 +135,17 @@ static void OpenDevice(AudioOut2Context& context) {
     context.device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
     if (context.device == 0) {
         AUDIOOUT2_TRACE("SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+        APS5_AUDIO_FAILURE("audio", "event=device-open-failed path=audioout2 error=%s", SDL_GetError());
         return;
     }
     SDL_PauseAudioDevice(context.device, 0);
     AUDIOOUT2_TRACE("SDL device %u opened: %d Hz, format 0x%x, %u channels, %u samples\n", context.device, obtained.freq, obtained.format, obtained.channels, obtained.samples);
+    // Mission 6: the host backend and the stream format that was actually obtained.
+    APS5_AUDIO_EVENT("audio", "event=device-open path=audioout2 device=%u backend=SDL requested_freq=%d requested_channels=%d obtained_freq=%u obtained_format=%u obtained_channels=%u obtained_samples=%u",
+                     static_cast<unsigned>(context.device), static_cast<unsigned>(desired.freq),
+                     static_cast<unsigned>(desired.channels), static_cast<unsigned>(obtained.freq),
+                     static_cast<unsigned>(obtained.format), static_cast<unsigned>(obtained.channels),
+                     static_cast<unsigned>(obtained.samples));
 }
 
 static void CloseDevice(SDL_AudioDeviceID device) {
@@ -191,7 +213,20 @@ static void QueuePadGrain(AudioOut2Context& context) {
     if (queuedBytes == 0) {
         static const std::vector<float> silence(static_cast<std::size_t>(CUSHION_MS) * AUDIO_OUT2_SAMPLE_RATE / 1000 * AUDIO_OUT2_PAD_DEVICE_CHANNELS_MAX, 0.0f);
         SDL_QueueAudio(context.padDevice, silence.data(), cushionBytes);
+        // Mission 6: the cushion is literal silence; the host queue is primed with it.
+        APS5_AUDIO_EVENT("audio", "event=silence-cushion path=audioout2 device=%u bytes=%u channels=%u",
+                         static_cast<unsigned>(context.padDevice), cushionBytes,
+                         static_cast<unsigned>(context.padLayout.channels));
     }
+    // Mission 6: the signal statistics of the grain that reaches the host device. The format
+    // is known (interleaved 32-bit float at the pad layout's channel count).
+    const auto stats = Aps5Pcm::Compute(context.padFrames.data(), grainBytes, static_cast<std::uint32_t>(context.padLayout.channels), true);
+    APS5_AUDIO_EVENT("audio", "event=host-queue path=audioout2 device=%u bytes=%u frames=%u channels=%u format=f32 queued_before=%u peak=%.6f rms=%.6f zero_samples=%llu/%llu",
+                     static_cast<unsigned>(context.padDevice), grainBytes, context.grain,
+                     static_cast<unsigned>(context.padLayout.channels),
+                     static_cast<unsigned>(queuedBytes), stats.peak, stats.rms,
+                     static_cast<unsigned long long>(stats.zeroSamples),
+                     static_cast<unsigned long long>(stats.sampleCount));
     SDL_QueueAudio(context.padDevice, context.padFrames.data(), grainBytes);
 }
 
@@ -223,6 +258,14 @@ static void DeviceCallback(void* userdata, Uint8* stream, int length) {
     std::lock_guard lock(context.lock);
     auto* out = reinterpret_cast<float*>(stream);
     const auto samples = static_cast<std::size_t>(length) / sizeof(float);
+    // Mission 7: the main output device's host write. The event is aggregated over many
+    // callbacks so the trace stays bounded, and it carries the signal statistics of what
+    // actually reached the host device.
+    static std::uint64_t callbackSamples = 0;
+    static std::uint64_t callbackWritten = 0;
+    static std::uint64_t callbackSilent = 0;
+    static std::uint64_t callbackCalls = 0;
+    static float callbackPeak = 0.0f;
     const auto cushionSamples = static_cast<std::size_t>(CushionGrains(context)) * context.grain * AUDIO_OUT2_OUTPUT_CHANNELS;
     if (context.priming && context.output.size() >= cushionSamples) context.priming = false;
     const auto count = context.priming ? 0 : std::min(samples, context.output.size());
@@ -232,6 +275,25 @@ static void DeviceCallback(void* userdata, Uint8* stream, int length) {
     if (count < samples && !context.priming) {
         context.priming = true;
         context.primes++;
+    }
+    callbackCalls++;
+    callbackSamples += samples;
+    callbackWritten += count;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto value = std::abs(out[index]);
+        if (value > callbackPeak) callbackPeak = value;
+        if (value == 0.0f) ++callbackSilent;
+    }
+    if (callbackCalls >= 64) {
+        APS5_AUDIO_EVENT("audio", "event=host-callback path=audioout2 calls=%llu samples=%llu written=%llu queued=%zu silent_samples=%llu peak=%.6f",
+                         static_cast<unsigned long long>(callbackCalls), static_cast<unsigned long long>(callbackSamples),
+                         static_cast<unsigned long long>(callbackWritten), context.output.size(),
+                         static_cast<unsigned long long>(callbackSilent), static_cast<double>(callbackPeak));
+        callbackCalls = 0;
+        callbackSamples = 0;
+        callbackWritten = 0;
+        callbackSilent = 0;
+        callbackPeak = 0.0f;
     }
 }
 
@@ -340,6 +402,8 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     while (QueueLevel(*context, now) >= context->queueDepth) {
         if (!blocking) {
             context->fullRejects++;
+            APS5_AUDIO_FAILURE("audio", "event=push-rejected path=audioout2 ctx=%llu reason=queue-full depth=%u",
+                               static_cast<unsigned long long>(ctx), context->queueDepth);
             if (context->fullRejects <= CALL_TRACE_FULL) AUDIOOUT2_TRACE("t=%.3f Push ctx %p non-blocking on a full queue (%u): rejected\n", AudioOut2TraceSeconds(), static_cast<void*>(context), context->queueDepth);
             return SCE_AUDIO_OUT2_ERROR_QUEUE_FULL;
         }
@@ -390,6 +454,10 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     }
     context->pushes++;
     context->summaryPushes++;
+    APS5_AUDIO_EVENT("audio", "event=guest-push path=audioout2 ctx=%llu blocking=%u grain=%u queued=%llu hw_queue=%u/%u unread_ms=%u dropped=%llu",
+                     static_cast<unsigned long long>(ctx), blocking, mixed, static_cast<unsigned long long>(context->queued),
+                     QueueLevel(*context, now), context->queueDepth, PendingMs(*context),
+                     static_cast<unsigned long long>(context->dropped));
     if (blocking) context->blockingPushes++;
     if (context->pushes <= CALL_TRACE_FULL) {
         AUDIOOUT2_TRACE("t=%.3f Push ctx %p blocking=%u: grain from %u ports, hw queue %u/%u, unread %u ms\n", AudioOut2TraceSeconds(), static_cast<void*>(context), blocking,

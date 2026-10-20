@@ -62,6 +62,10 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
 void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner);
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target);
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource);
+// Mission 21: whether a live multisampled color target keeps the guest surface at this
+// address. The title's multisample target and its single-sample surface share the address
+// it gave them, so a descriptor that names that address addresses the target.
+bool MultisampleTargetCovers(const Context& context, std::uint64_t address);
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
@@ -70,6 +74,16 @@ void ClearMultisampleTargets(VkDevice device);
 void InstallResidentImageReadGuard_nid_no_patch();
 void UpdateResidentImageUnmapObserver_nid_no_patch();
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access);
+// Mission 21: prepare a guest read that overlaps a multisampled color target. The target's
+// samples live only on the host, so a read of the target's own single-sample surface is
+// served by resolving the target into that surface first; a read that reaches past the
+// surface into the sample footprint is still refused.
+void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, const char* access);
+// Mission 21: prepare a guest read that overlaps a multisampled color target. The target's
+// samples live only on the host, so a read of the target's own single-sample surface is
+// served by resolving the target into that surface first; a read that reaches past the
+// surface into the sample footprint is still refused.
+void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, const char* access);
 
 }
 

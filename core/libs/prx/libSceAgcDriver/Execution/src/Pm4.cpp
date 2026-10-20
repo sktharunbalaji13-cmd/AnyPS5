@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ViewportTrace.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include <algorithm>
@@ -82,6 +83,11 @@ Registers& registersFor(QueueState& queue, std::uint32_t opcode) {
 }
 
 void writeRegister(QueueState& queue, std::uint32_t opcode, std::uint32_t offset, std::uint32_t value) {
+    // Mission 8: a guest write of a clip viewport register is the start of the viewport's
+    // provenance, so it is recorded where it happens.
+    if (Graphics::ViewportTrace::Enabled() && Graphics::ViewportTrace::IsViewportRegister(offset)) {
+        Graphics::ViewportTrace::WriteEvent("packet", opcode, offset, value);
+    }
     if ((opcode == 0x69 || opcode == 0x9f) && (offset == 0x8e || offset == 0x8f || offset == 0x318 || offset == 0x31b || offset == 0x31c || offset == 0x31d || offset == 0x390 || offset == 0x3b0 || offset == 0x3b8))
         APS5_LOG_OUT_DEBUG("CONTEXT WRITE opcode=0x%x offset=0x%x value=0x%x", opcode, offset, value);
     registersFor(queue, opcode).insert_or_assign(offset, value);

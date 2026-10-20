@@ -395,6 +395,74 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
+    add_test_executable(agc_frame_dump_schedule_tests tests/FrameDumpSchedule.cpp)
+    target_include_directories(agc_frame_dump_schedule_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_frame_dump_schedule_tests PRIVATE libc)
+    configure_windows_unwind(agc_frame_dump_schedule_tests)
+    add_test(NAME agc_frame_dump_schedule COMMAND agc_frame_dump_schedule_tests)
+    set_tests_properties(agc_frame_dump_schedule PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        # The test links the libc module, which the loader finds in the module output
+        # directory (the same directory the other module tests use).
+        set_tests_properties(agc_frame_dump_schedule PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(agc_viewport_trace_tests tests/ViewportTrace.cpp)
+    target_include_directories(agc_viewport_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_viewport_trace_tests PRIVATE libc)
+    configure_windows_unwind(agc_viewport_trace_tests)
+    add_test(NAME agc_viewport_trace COMMAND agc_viewport_trace_tests)
+    set_tests_properties(agc_viewport_trace PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_viewport_trace PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(agc_pipeline_stats_probe_tests tests/PipelineStatsProbe.cpp)
+    target_include_directories(agc_pipeline_stats_probe_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+    target_link_libraries(agc_pipeline_stats_probe_tests PRIVATE libc)
+    configure_windows_unwind(agc_pipeline_stats_probe_tests)
+    add_test(NAME agc_pipeline_stats_probe COMMAND agc_pipeline_stats_probe_tests)
+    set_tests_properties(agc_pipeline_stats_probe PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_pipeline_stats_probe PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(agc_push_trace_tests tests/PushTrace.cpp)
+    target_include_directories(agc_push_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_push_trace_tests PRIVATE libc)
+    configure_windows_unwind(agc_push_trace_tests)
+    add_test(NAME agc_push_trace COMMAND agc_push_trace_tests)
+    set_tests_properties(agc_push_trace PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_push_trace PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(agc_draw_input_trace_tests tests/DrawInputTrace.cpp)
+    target_include_directories(agc_draw_input_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_draw_input_trace_tests PRIVATE libc)
+    configure_windows_unwind(agc_draw_input_trace_tests)
+    add_test(NAME agc_draw_input_trace COMMAND agc_draw_input_trace_tests)
+    set_tests_properties(agc_draw_input_trace PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_draw_input_trace PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(agc_target_capture_schedule_tests tests/TargetCaptureSchedule.cpp)
+    target_include_directories(agc_target_capture_schedule_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_target_capture_schedule_tests PRIVATE libc)
+    configure_windows_unwind(agc_target_capture_schedule_tests)
+    add_test(NAME agc_target_capture_schedule COMMAND agc_target_capture_schedule_tests)
+    set_tests_properties(agc_target_capture_schedule PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(agc_target_capture_schedule PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(agc_frame_dump_io_tests tests/FrameDumpIo.cpp)
     target_include_directories(agc_frame_dump_io_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_frame_dump_io_tests PRIVATE libc)

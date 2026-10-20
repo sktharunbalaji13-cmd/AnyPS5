@@ -1362,6 +1362,19 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         geometry = DescribeSurface(descriptor);
         mips = geometry.mips;
         arrayLayers = geometry.layers;
+        // Mission 5: a stable identity for this image, so a draw's target and the image the
+        // presentation path blits can be shown to be the same surface rather than assumed to be.
+        {
+            static std::atomic<std::uint64_t> next{0};
+            id = next.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+        if (Aps5Diag::Enabled("APS5_DIAG_TARGET")) {
+            Aps5Diag::Event("target", "create id=%llu addr=0x%llx %ux%u mips=%u layers=%u format=%u vk=%d tile=%d",
+                            static_cast<unsigned long long>(id),
+                            static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width,
+                            descriptor.height, descriptor.mipCount, geometry.layers, descriptor.format,
+                            static_cast<int>(vkFormat), static_cast<int>(descriptor.tileMode));
+        }
         const auto elementBytes = BytesPerElement(descriptor.format);
         guestBytes = geometry.guestBytes;
         // Storage images in heaps the guest commits on demand only read and store committed pages.
@@ -5426,6 +5439,11 @@ StorageTexture::~StorageTexture() {
         auto& live = Live();
         std::lock_guard lock(live.mutex);
         std::erase(live.textures, this);
+    }
+    if (Aps5Diag::Enabled("APS5_DIAG_TARGET")) {
+        Aps5Diag::Event("target", "destroy id=%llu addr=0x%llx dirty=%d",
+                        static_cast<unsigned long long>(id),
+                        static_cast<unsigned long long>(descriptor.baseAddress), dirty ? 1 : 0);
     }
     // Cache eviction flushes first; anything still pending here is being torn down with the device.
     {

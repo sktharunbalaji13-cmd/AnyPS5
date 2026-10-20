@@ -8,6 +8,7 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/FileTrace.hpp"
 #include "prx/libkernel/File/include/SharedMemory.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
@@ -1146,10 +1147,19 @@ int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
-    if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) return *archived;
+    if (const auto archived = File::ReadArchivedFile(d, buf, nbytes, &offset)) {
+        FileTrace::Read("pread", d, nbytes, *archived, offset);
+        return *archived;
+    }
     char empty = 0;
     const auto result = NativePread(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
-    return result < 0 ? SceErrorFromErrno(errno) : result;
+    if (result < 0) {
+        const std::int64_t failure = SceErrorFromErrno(errno);
+        FileTrace::Read("pread", d, nbytes, failure, offset);
+        return failure;
+    }
+    FileTrace::Read("pread", d, nbytes, result, offset);
+    return result;
 }
 
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {

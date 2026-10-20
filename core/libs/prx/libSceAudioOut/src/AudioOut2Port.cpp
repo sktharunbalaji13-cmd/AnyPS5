@@ -11,6 +11,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <prx/libc/include/general/DiagTrace.hpp>
 #include "AudioOut2Internal.hpp"
 #include "AudioOut2PadMix.hpp"
 #include "AudioOutShutdown.hpp"
@@ -35,6 +36,18 @@ static constexpr std::uint32_t FORMAT_FIELDS_MASK = 0xFFFu;
 static constexpr std::uint16_t PORT_TYPE_MAIN = 0;
 static constexpr int PORT_ERROR_FORMAT_FLAG_WITHOUT_8_CHANNELS = static_cast<int>(0x80268001);
 static constexpr int PORT_ERROR_UNSUPPORTED_FORMAT = static_cast<int>(0x8026800E);
+
+// Mission 7: the guest's own audio path (the PCM pointer and the per-channel volume) is traced
+// on the diagnostic channel. The events are bounded: the first few calls of a port in full,
+// then one every ATTRIBUTE_TRACE_EVERY calls.
+namespace {
+bool AudioDiagnostics() {
+    static const bool on = Aps5Diag::Enabled("APS5_DIAG_AUDIO");
+    return on;
+}
+} // namespace
+#define APS5_AUDIO_EVENT(...) do { if (AudioDiagnostics()) Aps5Diag::Event(__VA_ARGS__); } while (0)
+#define APS5_AUDIO_FAILURE(...) do { if (AudioDiagnostics()) Aps5Diag::Failure(__VA_ARGS__); } while (0)
 
 static std::mutex g_portsLock;
 // Grows on demand: the title opens its bed ports plus max_object_ports object ports at once.
@@ -277,7 +290,13 @@ int APS5_VABI sceAudioOut2PortSetAttributes(AudioOut2PortHandle port, const Audi
             verdict = "volume";
         }
         const auto traces = entry->attributeTraces++;
-        if (traces < ATTRIBUTE_TRACE_FULL || traces % ATTRIBUTE_TRACE_EVERY == 0) TraceAttribute(port, *entry, attribute, verdict);
+        if (traces < ATTRIBUTE_TRACE_FULL || traces % ATTRIBUTE_TRACE_EVERY == 0) {
+            TraceAttribute(port, *entry, attribute, verdict);
+            APS5_AUDIO_EVENT("audio", "event=guest-attribute path=audioout2 port=%llu id=%u size=%u verdict=%s data_null=%d channels=%u datasets=%llu",
+                             static_cast<unsigned long long>(port), attribute.attribute_id, attribute.value_size, verdict,
+                             attribute.value == nullptr ? 1 : 0, entry->channels,
+                             static_cast<unsigned long long>(entry->dataSets));
+        }
     }
     return 0;
 } catch (const ProcessShutdown&) {

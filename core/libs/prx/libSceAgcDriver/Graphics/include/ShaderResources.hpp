@@ -245,7 +245,13 @@ public:
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
     const std::vector<std::uint32_t>& FragmentLayoutKey() const { return fragmentLayoutKey; }
     // Debug aid: each bound guest resource with the fraction of sampled bytes that are nonzero.
+    std::uint32_t NullImageDescriptors() const { return nullImageDescriptors; }
     std::string Describe() const;
+    // Mission 21: the image bindings the plan expected against the ones the lookup
+    // resolved. A planned sampled image that resolved to none was a guest descriptor that
+    // decoded as null (a null image is bound in its place, invisibly).
+    std::uint32_t PlannedSampledImages() const { return plannedSampledImages; }
+    std::uint32_t PlannedStorageImages() const { return plannedStorageImages; }
 
     // Reuse across dispatches of identical content (see the resource cache in VulkanDevice): the
     // key is everything a compute build consumes from its compiled shader (variant, and per binding
@@ -644,6 +650,7 @@ private:
     std::vector<DeferredImages> deferredImages;
     std::uint64_t storageBuffers = 0;
     bool updateAfterBind = false;
+    std::uint32_t nullImageDescriptors = 0;
     std::uint32_t plannedSampledImages = 0;
     std::uint32_t plannedStorageImages = 0;
     // The compute constructor's shader and captured regions: the caller's objects, valid only until

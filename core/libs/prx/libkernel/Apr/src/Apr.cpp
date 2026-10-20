@@ -12,6 +12,7 @@
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/File/include/FileTrace.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <array>
@@ -160,11 +161,20 @@ void _readFile(const Apr::ReadFileCommand& command) {
     const auto file = _file(command.fileId);
     static const bool trace = std::getenv("APS5_TRACE_APR") != nullptr;
     if (trace) std::fprintf(stderr, "[apr] read %s offset=0x%llx size=0x%llx -> 0x%llx\n", file.path.string().c_str(), static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.destination));
+    // Mission 3: the opt-in diagnostic channel records the outcome of the same read without
+    // changing it. The existing APS5_TRACE_APR line above is unchanged.
+    const auto failRead = [&](const std::string& message) -> void {
+        if (FileTrace::Enabled()) {
+            FileTrace::AprRead(file.path.string().c_str(), static_cast<std::int64_t>(command.offset),
+                               command.size, -1, true);
+        }
+        throw std::runtime_error(message);
+    };
     std::ifstream stream(file.path, std::ios::binary);
-    if (!stream) throw std::runtime_error("APR: cannot open " + file.path.string());
+    if (!stream) failRead("APR: cannot open " + file.path.string());
     stream.seekg(static_cast<std::streamoff>(command.offset));
     const GuestArena::HostWrite destination(reinterpret_cast<void*>(command.destination), command.size);
-    if (!destination.Open()) throw std::runtime_error("APR: the read destination of " + file.path.string() + " is not writable guest memory");
+    if (!destination.Open()) failRead("APR: the read destination of " + file.path.string() + " is not writable guest memory");
 #ifdef _WIN32
     std::array<char, 64u * 1024u> staging;
     std::uint64_t read = 0;
@@ -174,16 +184,20 @@ void _readFile(const Apr::ReadFileCommand& command) {
         const auto obtained = static_cast<std::uint64_t>(stream.gcount());
         if (obtained != 0) std::memcpy(reinterpret_cast<char*>(command.destination) + read, staging.data(), static_cast<std::size_t>(obtained));
         read += obtained;
-        if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+        if (stream.bad()) failRead("APR: read failed for " + file.path.string());
         if (obtained != static_cast<std::uint64_t>(wanted)) break;
     }
 #else
     stream.read(reinterpret_cast<char*>(command.destination), static_cast<std::streamsize>(command.size));
-    if (stream.bad()) throw std::runtime_error("APR: read failed for " + file.path.string());
+    if (stream.bad()) failRead("APR: read failed for " + file.path.string());
     const auto read = static_cast<std::uint64_t>(stream.gcount());
 #endif
-    if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
+    if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) failRead("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
+    if (FileTrace::Enabled()) {
+        FileTrace::AprRead(file.path.string().c_str(), static_cast<std::int64_t>(command.offset), command.size,
+                           static_cast<std::int64_t>(read), false);
+    }
 }
 
 void _writeAddress(const Apr::WriteAddressCommand& command) {

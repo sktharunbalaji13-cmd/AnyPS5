@@ -119,6 +119,10 @@ public:
     bool KnownHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::optional<std::uint32_t>& highest);
     void KeepHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint64_t generation, std::uint64_t registryGeneration, std::optional<std::uint32_t> highest);
     void OnComplete(std::function<void()> action);
+    // Ends the render pass a draw left open (the pass's trailing barrier, so its attachments
+    // return to their storage layout), so a command that cannot run inside a pass (a copy) can
+    // be recorded into the open batch.
+    void EndOpenRenderPass() { endOpenRenderPass(); }
     void NotePendingWrite(std::uint64_t address, std::size_t bytes);
     void NotePendingFill(std::uint64_t address, std::size_t bytes, std::uint8_t value);
     void NotePendingWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word);
