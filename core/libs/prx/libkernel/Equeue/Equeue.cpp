@@ -205,7 +205,22 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
     }
     TriggerExpiredTimers(MonotonicNs());
     PollEvents();
-    return CollectTriggered(ev, num);
+    const auto collected = CollectTriggered(ev, num);
+    // Diagnostic aid (APS5_TRACE_EQUEUE=1): the poll and what it collected, so a guest that
+    // polls an event queue that holds a delivered event is visible.
+    if (std::getenv("APS5_TRACE_EQUEUE") != nullptr) {
+        static std::uint64_t polls = 0;
+        static std::uint64_t hits = 0;
+        ++polls;
+        hits += static_cast<std::uint64_t>(collected > 0 ? collected : 0);
+        if (polls <= 40 || collected > 0) {
+            std::fprintf(stderr, "[equeue] the poll on %p for %d event(s) collected %d\n", static_cast<void*>(this), num, collected);
+        }
+        if (polls % 1000 == 0) {
+            std::fprintf(stderr, "[equeue] %llu polls collected %llu events\n", static_cast<unsigned long long>(polls), static_cast<unsigned long long>(hits));
+        }
+    }
+    return collected;
 }
 
 bool KernelEqueuePrivate::HasTriggeredEvents() {
@@ -227,12 +242,27 @@ int KernelEqueuePrivate::WaitForEventsUntil(KernelEvent* ev, int num, std::uint6
     if (m_closed) {
         return SCE_KERNEL_ERROR_EBADF;
     }
+    // Diagnostic aid (APS5_TRACE_EQUEUE=1): the wait and the events it collected, so a guest
+    // that waits for an event that never arrives is visible.
+    static const bool trace = std::getenv("APS5_TRACE_EQUEUE") != nullptr;
+    const auto waitStart = std::chrono::steady_clock::now();
+    std::uint64_t collected = 0;
+    bool waited = false;
     for (;;) {
         TriggerExpiredTimers(MonotonicNs());
         const bool polling = PollEvents();
         const int ret = CollectTriggered(ev, num);
         if (ret != 0) {
+            if (trace) {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count();
+                std::fprintf(stderr, "[equeue] the wait on %p collected %d event(s) after %lld ms\n", static_cast<void*>(this), ret, static_cast<long long>(ms));
+            }
             return ret;
+        }
+        if (trace && !waited) {
+            waited = true;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count();
+            std::fprintf(stderr, "[equeue] the wait on %p for %d event(s) begins after %lld ms\n", static_cast<void*>(this), num, static_cast<long long>(ms));
         }
         if (m_closed) {
             return SCE_KERNEL_ERROR_EBADF;
@@ -405,6 +435,11 @@ int APS5_VABI EqueueAddEvent_nid_postfix(KernelEqueue eq, const KernelEqueueEven
 }
 
 int APS5_VABI EqueueTriggerEvent_nid_postfix(KernelEqueue eq, uintptr_t ident, int16_t filter, void* triggerData) {
+    // Diagnostic aid (APS5_TRACE_EQUEUE=1): the event delivery, so a wait for an event that
+    // is never delivered is visible.
+    if (std::getenv("APS5_TRACE_EQUEUE") != nullptr) {
+        std::fprintf(stderr, "[equeue] the event %llu with the filter %d is delivered to %p\n", static_cast<unsigned long long>(ident), static_cast<int>(filter), reinterpret_cast<void*>(static_cast<std::uintptr_t>(eq)));
+    }
     auto owner = EqueuePin_nid_postfix(eq);
     if (!owner) {
         return SCE_KERNEL_ERROR_EBADF;

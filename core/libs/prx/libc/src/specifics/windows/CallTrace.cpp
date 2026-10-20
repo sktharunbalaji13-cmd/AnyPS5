@@ -5,9 +5,11 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -97,6 +99,29 @@ extern "C" {
 
 void APS5_VABI CallTraceRecord_nid_no_patch(const void* record, std::uint64_t returnAddress) {
     static_cast<const ImportRecord*>(record)->calls.fetch_add(1, std::memory_order_relaxed);
+    // Diagnostic aid (APS5_TRACE_CALL_COUNTS=1): the call counts per library, so a guest that
+    // stops calling a library is visible. The guest's import names are obfuscated, so the
+    // library is what the report names.
+    if (std::getenv("APS5_TRACE_CALL_COUNTS") != nullptr) {
+        static std::atomic<std::uint64_t> report{0};
+        const auto sequence = report.fetch_add(1, std::memory_order_relaxed);
+        if (sequence % 200000 == 0) {
+            std::lock_guard lock(g_mutex);
+            std::map<std::string, std::uint64_t> perLibrary;
+            for (const auto& entry : g_records) {
+                perLibrary[entry.library] += entry.calls.load(std::memory_order_relaxed);
+            }
+            std::fprintf(stderr, "[calls] after %llu calls:", static_cast<unsigned long long>(sequence));
+            for (const auto& [library, calls] : perLibrary) {
+                if (calls != 0) std::fprintf(stderr, " %s=%llu", library.c_str(), static_cast<unsigned long long>(calls));
+            }
+            std::fprintf(stderr, "\n");
+            for (const auto& entry : g_records) {
+                const auto calls = entry.calls.load(std::memory_order_relaxed);
+                if (calls != 0) std::fprintf(stderr, "[calls]   %s %s %llu\n", entry.library.c_str(), entry.name.c_str(), static_cast<unsigned long long>(calls));
+            }
+        }
+    }
     const std::uint64_t sequence = g_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
     RingSlot& slot = g_ring[sequence % RingCapacity];
     slot.sequence.store(0, std::memory_order_release);
@@ -115,6 +140,11 @@ void* TraceImport_nid_no_patch(void* target, const char* name, const char* libra
     }
     if (const auto existing = g_thunkByTarget.find(target); existing != g_thunkByTarget.end()) return existing->second;
     g_records.emplace_back(target, name, library);
+    // Diagnostic aid: the guest's import list, so the API the guest uses for a signal the
+    // emulator delivers can be seen without a debugger.
+    if (std::getenv("APS5_TRACE_IMPORT_LIST") != nullptr) {
+        std::fprintf(stderr, "[import] %s %s\n", library, name);
+    }
     void* thunk = WriteThunk(g_records.back());
     g_thunkByTarget.emplace(target, thunk);
     return thunk;
