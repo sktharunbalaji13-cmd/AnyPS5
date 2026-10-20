@@ -222,7 +222,25 @@ void Driver::WaitIdle() {
     std::unique_lock lock(mutex);
     const auto target = accepted;
     ++idleWaiters;
-    changed.wait(lock, [&] { return failure != nullptr || stopping || completed >= target; });
+    // The wait lasts as long as the slowest queue. A wait that never ends names the queues
+    // that still hold a submission, so the blocked one is visible.
+    const auto start = std::chrono::steady_clock::now();
+    bool reported = false;
+    while (failure == nullptr && !stopping && completed < target) {
+        changed.wait_for(lock, std::chrono::milliseconds(500), [&] { return failure != nullptr || stopping || completed >= target; });
+        if (reported) continue;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (ms < 3000) continue;
+        reported = true;
+        if (std::getenv("APS5_REPORT_DRIVER_LOCK") == nullptr) continue;
+        std::fprintf(stderr, "[waitidle] the guest waits for the GPU: %llu of %llu submissions completed, %llu packets in flight\n",
+                     static_cast<unsigned long long>(completed), static_cast<unsigned long long>(target),
+                     static_cast<unsigned long long>(packetsInFlight.load()));
+        for (const auto& [queue, worker] : workers) {
+            if (worker.pending.empty()) continue;
+            std::fprintf(stderr, "[waitidle]   queue 0x%x has %zu submission(s) pending\n", queue, worker.pending.size());
+        }
+    }
     --idleWaiters;
     rethrowFailure();
     checkStopping();

@@ -330,6 +330,27 @@ void Driver::SubmitFlip(const FlipInfo& info) {
 }
 
 void Driver::Submit(const Packet* packet, std::uint32_t queue, bool cpuFlip) {
+    // The step this submission is in, so a submit that never returns names the step it
+    // stopped in. The guest's thread waits here, and the GPU waits for the guest.
+    static thread_local const char* phase = "the start";
+    struct Phase {
+        const char*& current;
+        const char* next;
+        explicit Phase(const char*& c, const char* n) : current(c), next(n) { current = n; }
+    };
+    struct PhaseWatch {
+        const char*& current;
+        std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+        bool reported = false;
+        explicit PhaseWatch(const char*& c) : current(c) {}
+        ~PhaseWatch() {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (ms < 3000 || reported) return;
+            reported = true;
+            if (std::getenv("APS5_REPORT_DRIVER_LOCK") == nullptr) return;
+            std::fprintf(stderr, "[submit] the submit is still in %s after %lld ms\n", current, static_cast<long long>(ms));
+        }
+    } watch(phase);
     const auto receivedAt = APS5_ENABLE_TIMING_LOG ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     CheckFailure();
     require(queue == 0 || (queue >= 0x20 && queue < SubmissionQueueEnd), "unsupported compute queue");
@@ -357,9 +378,13 @@ void Driver::Submit(const Packet* packet, std::uint32_t queue, bool cpuFlip) {
     validate(submission, descriptor.addr);
     readRegisterLists(submission);
     if (APS5_ENABLE_TIMING_LOG) submission.validatedAt = std::chrono::steady_clock::now();
+    phase = "the flip room";
     waitForFlipRoom(submission);
+    phase = "the flip order";
     holdFlipBehindWorker(submission);
+    phase = "the registration preparation";
     AwaitRegistrationPreparation();
+    phase = "the driver mutex";
     if (APS5_ENABLE_TIMING_LOG) submission.roomReadyAt = std::chrono::steady_clock::now();
     static const bool trace = std::getenv("APS5_TRACE_GPU") != nullptr;
     if (trace) std::fprintf(stderr, "[gpu] %.1f submit queue=0x%x dwords=%zu at %p\n", TraceMs(), queue, submission.commands.size(), static_cast<const void*>(descriptor.addr));

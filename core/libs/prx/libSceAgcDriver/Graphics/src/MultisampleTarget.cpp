@@ -1,4 +1,6 @@
 #include <shared_mutex>
+#include <thread>
+#include <chrono>
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -476,6 +478,56 @@ std::mutex& targetsMutex() {
     return mutex;
 }
 
+namespace {
+
+// The holder of the multisample targets mutex, so a wait for it names the holder and its age.
+// The mutex guards the target list and the acquire path; a holder that waits for the GPU
+// inside the critical section keeps every other queue out of it.
+const char*& targetsHolder() {
+    static const char* holder = "";
+    return holder;
+}
+
+std::chrono::steady_clock::time_point& targetsHolderAt() {
+    static std::chrono::steady_clock::time_point at{};
+    return at;
+}
+
+}  // namespace
+
+// Takes the targets mutex and reports a wait that does not finish, naming the holder. The wait
+// is a plain blocking lock: a thread that takes the mutex twice on itself must deadlock, the way
+// a plain lock_guard would, so the report never hides the fault it names.
+class TargetsGuard {
+public:
+    explicit TargetsGuard(const char* where) : where_(where) {
+        if (!targetsMutex().try_lock()) {
+            const auto start = std::chrono::steady_clock::now();
+            bool reported = false;
+            for (;;) {
+                if (targetsMutex().try_lock()) break;
+                if (!reported && std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+                    const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - targetsHolderAt()).count();
+                    std::fprintf(stderr, "[ms-target] %s waits for the multisample targets mutex, held by %s since %lld ms ago\n", where_, targetsHolder(), static_cast<long long>(age));
+                    reported = true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        targetsHolder() = where_;
+        targetsHolderAt() = std::chrono::steady_clock::now();
+    }
+    ~TargetsGuard() {
+        targetsHolder() = "";
+        targetsMutex().unlock();
+    }
+    TargetsGuard(const TargetsGuard&) = delete;
+    TargetsGuard& operator=(const TargetsGuard&) = delete;
+
+private:
+    const char* where_;
+};
+
 std::vector<std::shared_ptr<MultisampleTarget>>& targets() {
     static std::vector<std::shared_ptr<MultisampleTarget>> list;
     return list;
@@ -757,14 +809,14 @@ bool TakeMultisampledClear(MultisampledCmask& cmask, MultisampledColorFill& colo
 }
 
 VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, VkImage* image) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetView");
     const auto& acquired = acquire(context, target);
     if (image != nullptr) *image = acquired.image;
     return acquired.view;
 }
 
 VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, std::shared_ptr<void>& owner, VkImage* image) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetView");
     auto& acquired = acquire(context, target);
     owner = acquired.shared_from_this();
     if (image != nullptr) *image = acquired.image;
@@ -795,7 +847,7 @@ VkComponentMapping swapRedBlue(VkComponentMapping components) {
 }
 
 std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components, VkImageViewType viewType) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetTexture");
     discardRetiredTargets();
     const auto format = ResolveTextureFormat(resource.format);
     const MultisampleTarget* other = nullptr;
@@ -818,12 +870,12 @@ std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const 
 }
 
 void MaterializeMultisampleTargetClear(const Context& context, const ColorTarget& target) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MaterializeMultisampleTargetClear");
     acquire(context, target);
 }
 
 bool MultisampleTargetCovers(const Context& context, std::uint64_t address) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetCovers");
     discardRetiredTargets();
     return std::any_of(targets().begin(), targets().end(), [&](const auto& target) {
         return target->active->load(std::memory_order_acquire) && target->context.device == context.device && target->target.surfaceAddress == address;
@@ -831,7 +883,7 @@ bool MultisampleTargetCovers(const Context& context, std::uint64_t address) {
 }
 
 VkImageView MultisampleTargetStorageView(const Context& context, const GuestTextureResource& resource) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetStorageView");
     discardRetiredTargets();
     const auto format = ResolveTextureFormat(resource.format);
     const MultisampleTarget* other = nullptr;
@@ -856,14 +908,14 @@ VkImageView MultisampleTargetStorageView(const Context& context, const GuestText
 }
 
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampleTargetStorable");
     return std::any_of(targets().begin(), targets().end(), [&](const auto& candidate) {
         return candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameTarget(candidate->target, target) && candidate->Storable();
     });
 }
 
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("ResolveMultisampleTarget");
     auto& target = acquire(context, source);
     target.Keep();
     const std::array<VkImageView, 2> views{target.view, destinationView};
@@ -887,7 +939,7 @@ void ResolveMultisampleTarget(const Context& context, const ColorTarget& source,
 
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
     if (bytes == 0) return false;
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("MultisampledColorFillAbsorbs");
     return std::any_of(targets().begin(), targets().end(), [&](const auto& target) {
         VkClearColorValue clear{};
         return target->active->load(std::memory_order_acquire) && target->target.address == address && MultisampledColorBytes(target->target) == bytes && MultisampledFillClearColor(target->target, pattern, clear);
@@ -895,7 +947,7 @@ bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std:
 }
 
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("NoteColorMetadataFill");
     for (const auto& target : targets()) {
         if (!target->active->load(std::memory_order_acquire)) continue;
         target->colorFill.NoteFill(address, bytes, pattern);
@@ -918,7 +970,7 @@ void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
 }
 
 void ClearMultisampleTargets(VkDevice device) {
-    std::lock_guard lock(targetsMutex());
+    TargetsGuard lock("ClearMultisampleTargets");
     std::erase_if(targets(), [&](const auto& target) { return target->context.device == device; });
     std::unique_lock guardLock(guardedMutex());
     std::erase_if(guarded(), [&](const auto& range) { return range.device == device; });
@@ -978,18 +1030,25 @@ void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, cons
         }
     }
     // The read stays inside the target's surface: resolve the target into it, so the guest reads
-    // the resolved picture.
+    // the resolved picture. The resolve takes the targets mutex itself, so the targets are
+    // collected under the lock and the resolve runs outside it: holding the lock across the
+    // resolve would take the same non-recursive mutex twice on this thread and deadlock.
+    std::vector<std::shared_ptr<MultisampleTarget>> selected;
     {
-        std::lock_guard lock(targetsMutex());
+        TargetsGuard lock("PrepareMultisampleTargetRead");
         for (auto& target : targets()) {
             if (!target->active->load(std::memory_order_acquire)) continue;
             const auto& use = target->target;
             if (use.surfaceAddress == 0 || use.bytes == 0) continue;
             if (address >= use.surfaceAddress + use.bytes || use.surfaceAddress >= address + bytes) continue;
-            const auto destination = CachedStorageSurface(target->context, SurfaceForTarget(use));
-            if (destination == nullptr) continue;
-            ResolveMultisampleTarget(target->context, use, *destination, destination->AttachmentView(use.format, use.mip));
+            selected.push_back(target);
         }
+    }
+    for (const auto& target : selected) {
+        const auto& use = target->target;
+        const auto destination = CachedStorageSurface(target->context, SurfaceForTarget(use));
+        if (destination == nullptr) continue;
+        ResolveMultisampleTarget(target->context, use, *destination, destination->AttachmentView(use.format, use.mip));
     }
 }
 

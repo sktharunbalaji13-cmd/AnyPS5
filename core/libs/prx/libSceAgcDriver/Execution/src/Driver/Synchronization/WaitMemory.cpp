@@ -378,6 +378,13 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
         }
         if (!waitReported && std::chrono::steady_clock::now() - waitStart > std::chrono::seconds(5)) {
             waitReported = true;
+            // Diagnostic aid (APS5_WAIT_TIMEOUT_PROCEEDS=1): a wait that has not finished
+            // after five seconds is treated as satisfied, so the run shows what the guest
+            // does past the wait. The hardware never times a wait out, so this is a probe.
+            if (std::getenv("APS5_WAIT_TIMEOUT_PROCEEDS") != nullptr) {
+                std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM at 0x%llx proceeds past its timeout\n", queue, static_cast<unsigned long long>(awaited));
+                break;
+            }
             const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
             const auto reference = wide ? packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u) : packet[4];
             const auto mask = wide ? packet[6] | (static_cast<std::uint64_t>(packet[7]) << 32u) : packet[5];
@@ -390,9 +397,17 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                 if (record.length != 0 && record.target <= awaited && awaited < record.target + std::max<std::uint64_t>(record.length, 4))
                     std::fprintf(stderr, "[gpu]   earlier write by queue 0x%x opcode 0x%x at 0x%llx+0x%llx\n", record.queue, record.opcode, static_cast<unsigned long long>(record.target), static_cast<unsigned long long>(record.length));
             }
+            // The census of the guest's queues: a queue the guest used to publish the value
+            // this wait wants would show its submissions here.
+            for (std::uint32_t census = 0; census < 0x58u; ++census) {
+                const auto count = submissionCosts(census).submissions.load(std::memory_order_relaxed);
+                if (count == 0) continue;
+                std::fprintf(stderr, "[gpu]   queue 0x%x made %llu submissions\n", census, static_cast<unsigned long long>(count));
+            }
             // The write history holds only the packets the driver's own path saw. The guest's
             // CPU-side store to this range is not a packet, so the range's own content is
             // dumped here: the dwords around the awaited one, with the slot's neighbours.
+            if (std::getenv("APS5_TRACE_WAIT_WORDS") == nullptr) break;
             const auto base = awaited & ~0xfffull;
             for (std::uint64_t offset = 0; offset < 0x400; offset += 4) {
                 const auto* word = reinterpret_cast<const std::uint32_t*>(base + offset);
@@ -405,6 +420,13 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
         if (!warned && std::chrono::steady_clock::now() - start > std::chrono::milliseconds(waitTimeoutMs())) {
             warned = true;
             ++outcomes.timedOut;
+            // Diagnostic aid (APS5_WAIT_TIMEOUT_PROCEEDS=1): a wait that has timed out is
+            // treated as satisfied, so the run shows what the guest does past the wait. The
+            // hardware never times a wait out, so this is a probe, not a fix.
+            if (std::getenv("APS5_WAIT_TIMEOUT_PROCEEDS") != nullptr) {
+                std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM at 0x%llx proceeds past its timeout\n", queue, static_cast<unsigned long long>(awaited));
+                break;
+            }
             {
                 static std::mutex reportedMutex;
                 static std::set<std::uint64_t> reported;

@@ -330,6 +330,9 @@ private:
     // The site that took the driver's mutex last, for the diagnostic that reports a long wait
     // on it (the shader registration path and the draw path take it in opposite orders).
     static const void*& MutexHolderSite();
+    // The function that took it and when, so a long wait names the holder and its age.
+    static const char*& MutexHolderFunction();
+    static std::chrono::steady_clock::time_point& MutexHolderAt();
     std::mutex shutdownMutex;
     std::condition_variable changed;
 

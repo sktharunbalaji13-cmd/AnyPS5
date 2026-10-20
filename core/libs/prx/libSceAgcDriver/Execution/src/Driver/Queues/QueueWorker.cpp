@@ -169,6 +169,8 @@ void Driver::run(std::uint32_t id) noexcept {
                 PerformanceTimer timing("Driver.WorkerWait");
                 std::unique_lock lock(mutex);
                 MutexHolderSite() = __builtin_return_address(0);
+                MutexHolderFunction() = "queue worker";
+                MutexHolderAt() = std::chrono::steady_clock::now();
                 timing.Mark("mutex_wait");
                 auto& worker = workers.at(id);
                 auto& pending = worker.pending;

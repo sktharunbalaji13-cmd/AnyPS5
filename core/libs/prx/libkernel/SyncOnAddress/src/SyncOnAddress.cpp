@@ -80,6 +80,14 @@ std::optional<std::chrono::nanoseconds> WaitOnAddressLocked(TValue* address, TVa
         woken = true;
         return std::nullopt;
     }
+    // The wait blocks here. The address and the value it waits for are the only clue to what
+    // the guest's thread is waiting for when nothing wakes it.
+    static const bool traceSync = std::getenv("APS5_TRACE_SYNC_ADDRESS") != nullptr;
+    if (traceSync) {
+        std::fprintf(stderr, "[syncwait] the guest waits on 0x%llx for 0x%llx (it holds 0x%llx)\n",
+                     static_cast<unsigned long long>(key), static_cast<unsigned long long>(expected),
+                     static_cast<unsigned long long>(std::atomic_ref<TValue>(*address).load()));
+    }
 
     AddressWaiter waiter;
     auto& queue = g_waiters[key];
@@ -125,6 +133,11 @@ void WakeAddressLocked(std::uintptr_t key, std::int32_t count, bool wakesAtLeast
     const auto entry = g_waiters.find(key);
     if (entry == g_waiters.end()) {
         return;
+    }
+    static const bool traceSync = std::getenv("APS5_TRACE_SYNC_ADDRESS") != nullptr;
+    if (traceSync) {
+        std::fprintf(stderr, "[syncwake] the guest wakes 0x%llx (%zu waiter(s))\n",
+                     static_cast<unsigned long long>(key), entry->second.size());
     }
     auto& queue = entry->second;
     for (std::int32_t woken = 0; !queue.empty() && (woken < count || (wakesAtLeastOne && woken == 0)); ++woken) {

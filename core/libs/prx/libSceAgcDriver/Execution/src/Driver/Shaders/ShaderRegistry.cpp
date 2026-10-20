@@ -1239,7 +1239,20 @@ public:
     void AwaitSubmitted() {
         std::unique_lock lock(mutex);
         const auto ticket = submitted;
-        idle.wait(lock, [&] { return unfinished.empty() || *unfinished.begin() > ticket; });
+        // The state of the pool while the wait lasts: live workers, queued tasks, running
+        // tasks and unfinished tickets. A wait that never ends is only explicable by this.
+        const auto start = std::chrono::steady_clock::now();
+        bool reported = false;
+        while (!(unfinished.empty() || *unfinished.begin() > ticket)) {
+            idle.wait_for(lock, std::chrono::milliseconds(500), [&] { return unfinished.empty() || *unfinished.begin() > ticket; });
+            if (reported) continue;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (ms < 3000) continue;
+            reported = true;
+            std::fprintf(stderr, "[shader-prepare] the submit waits for the pool: %u live worker(s), %zu queued task(s), %u running, %zu unfinished, %llu submitted\n",
+                         liveWorkers.load(std::memory_order_acquire), tasks.size(), running, unfinished.size(),
+                         static_cast<unsigned long long>(submitted));
+        }
     }
 
     // The number of preparations still queued or running, for the diagnostic.
@@ -1295,6 +1308,7 @@ private:
                 ++pool.running;
             }
             const auto sequence = task.sequence;
+            const auto taskStart = std::chrono::steady_clock::now();
             // The task must not take the worker down with it: a worker that dies is never
             // replaced, and a task queued with no live worker is never run, so the thread that
             // waits for its preparation waits forever. The failure is reported and the worker
@@ -1307,6 +1321,12 @@ private:
                 std::fprintf(stderr, "[shader-prepare] a preparation task failed with an unknown exception\n");
             }
             task = {};
+            {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - taskStart).count();
+                if (ms >= 3000 && std::getenv("APS5_REPORT_DRIVER_LOCK") != nullptr) {
+                    std::fprintf(stderr, "[shader-prepare] a preparation task took %lld ms\n", static_cast<long long>(ms));
+                }
+            }
             bool drained = false;
             {
                 std::lock_guard lock(pool.mutex);
@@ -1747,6 +1767,9 @@ void Driver::SettleShaderPreparations(std::span<const Shader* const> stages) {
                 // module-relative offset, the form the thread sampler uses.
                 const auto site = Driver::MutexHolderSite();
                 const auto offset = site != nullptr ? GuestMemory::CodeOffset(site) : 0u;
+                const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - Driver::MutexHolderAt()).count();
+                std::fprintf(stderr, "[shader-prepare] the driver's mutex is held by another thread (%s, taken %lld ms ago, last taken at libSceAgcDriver.prx 0x%llx); this thread waits for it\n",
+                             Driver::MutexHolderFunction(), static_cast<long long>(age), static_cast<unsigned long long>(offset));
                 std::fprintf(stderr, "[shader-prepare] the driver's mutex is held by another thread (last taken at libSceAgcDriver.prx 0x%llx); this thread waits for it\n",
                              static_cast<unsigned long long>(offset));
             }
@@ -1860,6 +1883,16 @@ const void*& Driver::MutexHolderSite() {
     return site;
 }
 
+const char*& Driver::MutexHolderFunction() {
+    static const char* function = "";
+    return function;
+}
+
+std::chrono::steady_clock::time_point& Driver::MutexHolderAt() {
+    static std::chrono::steady_clock::time_point at{};
+    return at;
+}
+
 std::shared_ptr<const ShaderRegistry> Driver::RegisteredShaders() {
     std::lock_guard lock(mutex);
     return shaders;
@@ -1869,6 +1902,28 @@ void Driver::RegisterShader(const Shader* shader) {
     BindTitleThread();
     PerformanceContext timingContext(FrameTiming::Preparation());
     PerformanceTimer timing("Shader.Register");
+    // The phase this call is in, so a registration that never finishes names the step it
+    // stopped in instead of only showing that the driver's mutex stayed taken.
+    static thread_local const char* phase = "start";
+    struct Phase {
+        const char*& current;
+        const char* next;
+        explicit Phase(const char*& c, const char* n) : current(c), next(n) { current = n; }
+    };
+    Phase phaseMark(phase, "the transaction");
+    struct PhaseWatch {
+        const char*& current;
+        std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+        bool reported = false;
+        explicit PhaseWatch(const char*& c) : current(c) {}
+        ~PhaseWatch() {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (ms < 5000 || reported) return;
+            reported = true;
+            if (std::getenv("APS5_REPORT_DRIVER_LOCK") == nullptr) return;
+            std::fprintf(stderr, "[shader-register] the registration is still in %s after %lld ms\n", current, static_cast<long long>(ms));
+        }
+    } watch(phase);
     ShaderPreparationTransaction transaction;
     CheckFailure();
     GuestMemory::CheckRange(shader, sizeof(Shader), 1);
@@ -1887,10 +1942,14 @@ void Driver::RegisterShader(const Shader* shader) {
     snapshot.header.resize(fields.header_size);
     std::memcpy(snapshot.header.data(), static_cast<const void*>(shader), fields.header_size);
 
+    phase = "the transaction hold";
     transaction.Hold();
     {
+        phase = "the driver mutex";
         std::lock_guard lock(mutex);
         MutexHolderSite() = __builtin_return_address(0);
+        MutexHolderFunction() = "RegisterShader";
+        MutexHolderAt() = std::chrono::steady_clock::now();
         rethrowFailure();
         if (shaders != nullptr) {
             const auto found = shaders->find(snapshot.codeAddress);
@@ -1907,6 +1966,7 @@ void Driver::RegisterShader(const Shader* shader) {
         }
     }
 
+    phase = "the device";
     std::shared_ptr<VulkanDevice> localDevice = device.Load();
     if (localDevice == nullptr) {
         std::lock_guard gpuLock(GuestMemory::GpuMutex());
@@ -1924,6 +1984,7 @@ void Driver::RegisterShader(const Shader* shader) {
         static_cast<void>(PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred));
         snapshot.prepared->deferred = true;
     } else if (AsyncRegistrationPrepare()) {
+        phase = "the preparation plan";
         preparation = PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred);
         if (preparation != nullptr) preparation->prebuildDevice = localDevice;
         if (preparation != nullptr && (snapshot.type == 0 || snapshot.type == 1)) BuildRegisteredAbiKey(registered, *localDevice, preparation->abiKey);
@@ -1951,6 +2012,7 @@ void Driver::RegisterShader(const Shader* shader) {
         print(fields.sh_registers, fields.num_sh_registers);
         std::fprintf(stderr, "\n");
     }
+    phase = "the publish";
     const auto published = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
     std::lock_guard lock(mutex);
     rethrowFailure();
@@ -1959,6 +2021,7 @@ void Driver::RegisterShader(const Shader* shader) {
         PublishRegisteredShader(shaders, std::make_shared<const ShaderSnapshot>(PrepareNullPixelProgram(*localDevice)));
     }
     transaction.Commit();
+    phase = "the background preparation";
     if (preparation != nullptr) PrepareRegisteredInBackground(published, std::move(preparation));
 }
 

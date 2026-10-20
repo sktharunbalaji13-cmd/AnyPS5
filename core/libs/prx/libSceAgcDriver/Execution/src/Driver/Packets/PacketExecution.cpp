@@ -245,6 +245,14 @@ void Driver::execute(const Submission& submission) {
             landPendingWaits(submission.queue);
             recordQueuedLabelsBeforeRead(submission.queue);
             if (!Pm4::PredicationPasses(queue)) {
+                // A packet the predicate rejects is dropped without a trace. Its label, if any,
+                // is never written, so a guest that waits on that address waits forever.
+                if (std::getenv("APS5_TRACE_LABEL_ALL") != nullptr) {
+                    std::fprintf(stderr, "[skip] queue 0x%x offset %zu header %08x words %zu: the predicate rejected the packet\n",
+                                 submission.queue, cursor, header, packet.size());
+                    for (std::size_t i = 1; i < packet.size() && i < 7; ++i) std::fprintf(stderr, " %08x", packet[i]);
+                    std::fprintf(stderr, "\n");
+                }
                 cursor = opcode == 0x3f ? submission.conditionalEnds.at(cursor) : nextCursor;
                 continue;
             }
