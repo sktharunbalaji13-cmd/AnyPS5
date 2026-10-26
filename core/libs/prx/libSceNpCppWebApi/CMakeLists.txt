@@ -1,4 +1,4 @@
-add_library(libSceNpCppWebApi SHARED EXCLUDE_FROM_ALL Export.cpp)
+add_library(libSceNpCppWebApi SHARED EXCLUDE_FROM_ALL Export.cpp MissingExports.cpp)
 target_include_directories(libSceNpCppWebApi PRIVATE ${LIBS_INCLUDE_DIR})
 configure_windows_unwind(libSceNpCppWebApi)
 
