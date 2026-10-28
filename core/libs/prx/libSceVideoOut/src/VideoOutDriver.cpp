@@ -33,6 +33,9 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -293,6 +296,15 @@ VideoOutDriver& VideoOutDriver::Get() {
 VideoOutDriver::VideoOutDriver() {
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #ifdef _WIN32
+    if (auto defaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL); defaultDesk != nullptr) {
+        if (!SetThreadDesktop(defaultDesk)) {
+            std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) failed during VideoOutDriver init: %lu\n", GetLastError());
+        } else {
+            std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) succeeded during VideoOutDriver init\n");
+        }
+    }
+#endif
+#ifdef _WIN32
     SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
     if (std::getenv("APS5_NO_WGI") != nullptr) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_DEFAULT);
 #endif
@@ -308,6 +320,15 @@ VideoOutDriver::VideoOutDriver() {
         auto attached = started.get_future();
         presentThread = std::jthread([this, &started](std::stop_token token) {
             try {
+#ifdef _WIN32
+                if (auto defaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL); defaultDesk != nullptr) {
+                    if (!SetThreadDesktop(defaultDesk)) {
+                        std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) failed on presentThread: %lu\n", GetLastError());
+                    } else {
+                        std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) succeeded on presentThread\n");
+                    }
+                }
+#endif
                 AgcDriverRaiseWorkerThreadPriority_nid_postfix("presenter");
             } catch (...) {
                 started.set_exception(std::current_exception());
@@ -716,25 +737,59 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
-                processFlip(*current);
-                int windowWidth = 0;
-                int windowHeight = 0;
-                if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
-                if (windowWidth > 0 && windowHeight > 0) {
-                    const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
-                    mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
-                }
-                const auto finished = AgcDriver::FrameTiming::Clock::now();
-                AgcDriver::FrameTiming::Clock::duration interval{};
-                {
+                bool flipSuccess = false;
+                try {
+                    processFlip(*current);
+                    flipSuccess = true;
+                } catch (const ProcessShutdown&) {
+                    throw;
+                } catch (const std::exception& error) {
+                    std::fprintf(stderr, "[videoout] presentation flip dropped: %s\n", error.what());
+                    std::fflush(stderr);
                     std::lock_guard lock(current->cfg->mutex);
-                    const auto previous = current->cfg->lastTimingFlip;
-                    if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
-                    current->cfg->lastTimingFlip = finished;
+                    if (!current->cfg->Closed()) {
+                        current->gpuComplete = true;
+                        triggerEvents(*current->cfg, VIDEO_OUT_EVENT_FLIP, reinterpret_cast<void*>(current->flipArg));
+                        ++current->cfg->flipStatus.count;
+                        current->cfg->flipStatus.processTime = sceKernelGetProcessTime();
+                        current->cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
+                        current->cfg->flipStatus.flipArg = current->flipArg;
+                        const auto previous = current->cfg->flipStatus.currentBuffer;
+                        if (previous >= 0) {
+                            auto& label = current->cfg->bufferLabels[previous];
+                            AgcDriverStoreGuestLabel_nid_postfix(&label, 0);
+                        }
+                        current->cfg->flipStatus.currentBuffer = current->index;
+                        current->cfg->width = current->width;
+                        current->cfg->height = current->height;
+                        --current->cfg->flipStatus.flipPendingNum;
+                        --current->queue->reservations;
+                        current->cfg->vblankCond.notify_all();
+                    }
+                } catch (...) {
+                    std::fprintf(stderr, "[videoout] presentation flip dropped with non-standard exception\n");
+                    std::fflush(stderr);
                 }
+                if (flipSuccess) {
+                    int windowWidth = 0;
+                    int windowHeight = 0;
+                    if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                    if (windowWidth > 0 && windowHeight > 0) {
+                        const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
+                        mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+                    }
+                    const auto finished = AgcDriver::FrameTiming::Clock::now();
+                    AgcDriver::FrameTiming::Clock::duration interval{};
+                    {
+                        std::lock_guard lock(current->cfg->mutex);
+                        const auto previous = current->cfg->lastTimingFlip;
+                        if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
+                        current->cfg->lastTimingFlip = finished;
+                    }
 #if APS5_ENABLE_TIMING_LOG
-                timingLog->Enqueue(current->timing->Capture(current->outputHandle, current->index, current->flipArg, finished, interval));
+                    timingLog->Enqueue(current->timing->Capture(current->outputHandle, current->index, current->flipArg, finished, interval));
 #endif
+                }
             }
             if (current) {
                 current.reset();
@@ -745,11 +800,9 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
     } catch (const std::exception& error) {
         std::fprintf(stderr, "[videoout] presentation failed: %s\n", error.what());
         std::fflush(stderr);
-        std::terminate();
     } catch (...) {
         std::fprintf(stderr, "[videoout] presentation failed with a non-standard exception\n");
         std::fflush(stderr);
-        std::terminate();
     }
 #if APS5_ENABLE_TIMING_LOG
     try {

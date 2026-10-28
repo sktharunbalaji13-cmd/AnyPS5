@@ -655,7 +655,7 @@ void MarkDccUncompressed(const Context& context, std::uint64_t metaAddress, std:
     // (idempotent, no wait) rather than trusting the earlier one.
     const bool pending = recorder != nullptr && recorder->PendingWriteOverlaps(metaAddress, count);
     if (!pending && AlreadyUncompressed(metaAddress, count)) return;
-    if (recorder != nullptr && StoreUncompressedOnGpu(context, *recorder, metaAddress, count)) return;
+    if (recorder != nullptr) StoreUncompressedOnGpu(context, *recorder, metaAddress, count);
     StoreUncompressedOnCpu(metaAddress, count);
 }
 

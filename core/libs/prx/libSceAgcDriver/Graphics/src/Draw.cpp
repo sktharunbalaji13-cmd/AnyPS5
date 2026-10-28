@@ -1963,6 +1963,24 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
     }
     for (std::size_t index = 0; index < residents.size(); ++index) {
         if (residents[index] == nullptr) continue;
+        const auto addr = residents[index]->Descriptor().baseAddress;
+        if (addr == 0x1504910000 || addr == 0x1506940000) {
+            std::fprintf(stderr, "[draw-target 0x%llx] raster draw write! sampled_textures=%zu\n",
+                         static_cast<unsigned long long>(addr), resources->SampledTextures().size());
+            for (const auto& tex : resources->SampledTextures()) {
+                if (tex != nullptr) {
+                    if (tex->StorageSource() != nullptr) {
+                        std::fprintf(stderr, "   [sampled-storage 0x%llx] %ux%u fmt=%u\n",
+                                     static_cast<unsigned long long>(tex->StorageSource()->Descriptor().baseAddress),
+                                     tex->StorageSource()->Descriptor().width, tex->StorageSource()->Descriptor().height,
+                                     static_cast<unsigned>(tex->StorageSource()->Descriptor().format));
+                    } else {
+                        std::fprintf(stderr, "   [sampled-tex fmt=%d bytes=%llu]\n",
+                                     static_cast<int>(tex->ViewFormat()), static_cast<unsigned long long>(tex->AllocationBytes()));
+                    }
+                }
+            }
+        }
         if (index < slices.size()) residents[index]->MarkSliceDirty(slices[index].first, slices[index].second);
         else residents[index]->MarkDirty();
     }
@@ -2592,6 +2610,14 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
             });
         }
         if (binding.resident != nullptr) {
+            if (color.address == 0x1504910000 || color.address == 0x1506940000) {
+                std::fprintf(stderr, "[prepare-target 0x%llx] %ux%u fmt=%u idxCount=%u instCount=%u indexed=%d shaders=%zu\n",
+                             static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height,
+                             static_cast<unsigned>(color.format), draw.indexCount, draw.instanceCount, draw.indexed, shaders.size());
+                for (const auto& s : shaders) {
+                    std::fprintf(stderr, "   [shader stage %d]\n", static_cast<int>(s.stage));
+                }
+            }
             timer.phase(PhaseReadTarget);
             binding.proxied = AttachmentProxyFormat(context, color.format) != VK_FORMAT_UNDEFINED;
             targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice, color.layers, color.arraySlice));
@@ -2635,7 +2661,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         targetViews.push_back(binding.target->View());
     }
     if (state.depth) {
-        targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite));
+        targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite, state.stencilTest));
         if (writesDepthTarget(state)) NoteDepthSurfaceWrite(context, *state.depth);
     }
     timer.phase(PhasePrepare);
@@ -3291,7 +3317,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     }
     if (recipe.hasDepth) {
         timer.phase(PhaseSetup);
-        const auto depthView = DepthSurfaceView(context, *state.depth, state.depthWrite);
+        const auto depthView = DepthSurfaceView(context, *state.depth, state.depthWrite, state.stencilTest);
         if (writesDepthTarget(state)) NoteDepthSurfaceWrite(context, *state.depth);
         timer.phase(PhaseReadTarget);
         if (recipe.targetViews.back() != depthView) return miss(DrawRecipeMiss::TargetGone);

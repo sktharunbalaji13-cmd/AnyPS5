@@ -2232,9 +2232,50 @@ void reserveHeapBytes(std::uint64_t address, std::uint64_t bytes, std::uint64_t 
                 state.heapBytes += need;
                 return;
             }
-            if (attempt != 0) throw std::runtime_error(heapMirrorError(address, bytes, held, "past the budget"));
+        }
+        if (auto dropped = Spaces().current.exchange(nullptr)) {
+            // Drop cached previous AddressSpace to release stale mirror references
         }
         sweepMirrors();
+        {
+            std::lock_guard lock(state.mutex);
+            std::uint64_t held = state.heapBytes;
+            if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
+            if (held + need <= heapMirrorBudget()) {
+                state.heapBytes += need;
+                return;
+            }
+            // Evict idle heap mirrors (use_count <= 1) whose memory is not held by active work
+            std::size_t evicted = 0;
+            std::uint64_t evictedBytes = 0;
+            for (auto it = state.entries.begin(); it != state.entries.end();) {
+                if (it->first != address && it->second->heap && it->second.use_count() <= 1) {
+                    evictedBytes += it->second->accounted;
+                    unlistMirror(state, *it->second);
+                    it = state.entries.erase(it);
+                    ++state.version;
+                    ++evicted;
+                    if (state.heapBytes + need <= heapMirrorBudget()) break;
+                } else {
+                    ++it;
+                }
+            }
+            if (evicted != 0) {
+                std::fprintf(stderr, "[gpu] reserveHeapBytes: evicted %zu idle heap mirrors (%llu MiB) for 0x%llx+0x%llx (need=%llu MiB, held now=%llu MiB of %llu MiB)\n",
+                    evicted, static_cast<unsigned long long>(evictedBytes >> 20u),
+                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
+                    static_cast<unsigned long long>(need >> 20u),
+                    static_cast<unsigned long long>(state.heapBytes >> 20u),
+                    static_cast<unsigned long long>(heapMirrorBudget() >> 20u));
+                held = state.heapBytes;
+                if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
+                if (held + need <= heapMirrorBudget()) {
+                    state.heapBytes += need;
+                    return;
+                }
+            }
+            if (attempt != 0) throw std::runtime_error(heapMirrorError(address, bytes, held, "past the budget"));
+        }
     }
 }
 
@@ -2254,9 +2295,51 @@ void growResident(ImageMirror& mirror, const GuestRuns& runs) {
                 counted = true;
                 break;
             }
-            if (attempt != 0) throw std::runtime_error(heapMirrorError(mirror.base, mirror.reserved, state.heapBytes, "past the budget"));
+        }
+        if (auto dropped = Spaces().current.exchange(nullptr)) {
+            // Drop cached previous AddressSpace to release stale mirror references
         }
         sweepMirrors();
+        {
+            std::lock_guard lock(state.mutex);
+            if (!mirror.listed) break;
+            if (state.heapBytes + need <= heapMirrorBudget()) {
+                state.heapBytes += need;
+                mirror.accounted += need;
+                counted = true;
+                break;
+            }
+            // Evict idle heap mirrors (use_count <= 1) whose memory is not held by active work
+            std::size_t evicted = 0;
+            std::uint64_t evictedBytes = 0;
+            for (auto it = state.entries.begin(); it != state.entries.end();) {
+                if (it->first != mirror.base && it->second->heap && it->second.use_count() <= 1) {
+                    evictedBytes += it->second->accounted;
+                    unlistMirror(state, *it->second);
+                    it = state.entries.erase(it);
+                    ++state.version;
+                    ++evicted;
+                    if (state.heapBytes + need <= heapMirrorBudget()) break;
+                } else {
+                    ++it;
+                }
+            }
+            if (evicted != 0) {
+                std::fprintf(stderr, "[gpu] growResident: evicted %zu idle heap mirrors (%llu MiB) for 0x%llx+0x%llx (need=%llu MiB, held now=%llu MiB of %llu MiB)\n",
+                    evicted, static_cast<unsigned long long>(evictedBytes >> 20u),
+                    static_cast<unsigned long long>(mirror.base), static_cast<unsigned long long>(mirror.reserved),
+                    static_cast<unsigned long long>(need >> 20u),
+                    static_cast<unsigned long long>(state.heapBytes >> 20u),
+                    static_cast<unsigned long long>(heapMirrorBudget() >> 20u));
+                if (state.heapBytes + need <= heapMirrorBudget()) {
+                    state.heapBytes += need;
+                    mirror.accounted += need;
+                    counted = true;
+                    break;
+                }
+            }
+            if (attempt != 0) throw std::runtime_error(heapMirrorError(mirror.base, mirror.reserved, state.heapBytes, "past the budget"));
+        }
     }
     try {
         mirror.resident->Bind(runs);
@@ -2792,6 +2875,11 @@ std::shared_ptr<ImageMirror> acquireMirror(const Context& context, const std::sh
         mirror->watchedSerial.store(serial, std::memory_order_relaxed);
         if (context.sparseBinding && context.sparseResidencyBuffer && context.sparseResidencyAliased) backed = GuestNonzeroBlocks(sparse ? clipPieces(pieces, mirror->base, mirror->base + mirror->bytes) : GuestRuns{{mirror->base, mirror->base + mirror->bytes}});
         auto need = blockBytes(backed);
+        std::fprintf(stderr, "[gpu] acquireMirror: heap 0x%llx+0x%llx need=%llu MiB backed=%zu runs (held=%llu MiB, budget=%llu MiB)\n",
+            static_cast<unsigned long long>(selected.address), static_cast<unsigned long long>(selected.bytes),
+            static_cast<unsigned long long>(need >> 20u), backed.size(),
+            static_cast<unsigned long long>(state.heapBytes >> 20u),
+            static_cast<unsigned long long>(heapMirrorBudget() >> 20u));
         reserveHeapBytes(selected.address, selected.bytes, need);
         try {
             mirror->resident = ResidentBuffer::Create(context, mirror->base, mirror->bytes, backed);
@@ -2805,12 +2893,19 @@ std::shared_ptr<ImageMirror> acquireMirror(const Context& context, const std::sh
             throw std::runtime_error(heapMirrorError(selected.address, selected.bytes, held, error.what()));
         }
         if (mirror->resident == nullptr) {
+            std::fprintf(stderr, "[gpu] acquireMirror: ResidentBuffer::Create returned null for 0x%llx+0x%llx! Falling back to contiguous Buffer\n",
+                static_cast<unsigned long long>(selected.address), static_cast<unsigned long long>(selected.bytes));
             {
                 std::lock_guard lock(state.mutex);
                 state.heapBytes -= need;
             }
             need = mirror->bytes;
             reserveHeapBytes(selected.address, selected.bytes, need);
+        } else {
+            std::fprintf(stderr, "[gpu] acquireMirror: ResidentBuffer created for 0x%llx+0x%llx (devAddr=0x%llx, bound=%llu MiB)\n",
+                static_cast<unsigned long long>(selected.address), static_cast<unsigned long long>(selected.bytes),
+                static_cast<unsigned long long>(mirror->resident->DeviceAddress()),
+                static_cast<unsigned long long>(need >> 20u));
         }
         mirror->accounted = need;
     }

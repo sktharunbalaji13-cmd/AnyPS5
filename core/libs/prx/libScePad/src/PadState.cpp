@@ -242,6 +242,7 @@ Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
         lastInjected = injected;
         slots[0].timestamp = now;
         injectedTimestamp = now;
+        if (injected.buttons != 0) std::fprintf(stderr, "[pad] Injected buttons: 0x%x at %.2f s\n", injected.buttons, now / 1000000.0);
     }
     return injected;
 }

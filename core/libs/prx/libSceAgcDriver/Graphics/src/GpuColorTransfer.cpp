@@ -94,6 +94,9 @@ void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, 
     Require(layout.Bytes() <= context.limits.maxStorageBufferRange && linearBytes <= context.limits.maxStorageBufferRange, "color transfer exceeds storage buffer limits");
     Require((newWidth + 7u) / 8u <= context.limits.maxComputeWorkGroupCount[0] && (newHeight + 7u) / 8u <= context.limits.maxComputeWorkGroupCount[1], "color transfer exceeds workgroup limits");
     if (tiled && width == newWidth && height == newHeight && mode == newMode && elementBytes == newElementBytes) return;
+    tiled.reset();
+    tiledDevice.reset();
+    linear.reset();
     constexpr VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     auto newTiled = std::make_unique<Buffer>(context, layout.Bytes(), copies);
     auto newTiledDevice = std::make_unique<DeviceBuffer>(context, layout.Bytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);

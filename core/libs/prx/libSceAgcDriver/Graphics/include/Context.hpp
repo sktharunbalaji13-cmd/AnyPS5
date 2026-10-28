@@ -338,9 +338,15 @@ struct Context {
         properties.pNext = &reported;
         memoryProperties2(physical, &properties);
         const auto heap = memory.memoryTypes[type].heapIndex;
-        const auto budget = reported.heapBudget[heap];
-        const auto usage = reported.heapUsage[heap];
+        auto budget = reported.heapBudget[heap];
+        auto usage = reported.heapUsage[heap];
         if (budget == 0 || (usage < budget && bytes <= budget - usage)) return type;
+        if (cacheReclaim != nullptr) {
+            cacheReclaim(std::max<VkDeviceSize>(bytes, 64ULL << 20u), true);
+            memoryProperties2(physical, &properties);
+            usage = reported.heapUsage[heap];
+            if (budget == 0 || (usage < budget && bytes <= budget - usage)) return type;
+        }
         const auto host = HostMemoryType(mask);
         if (!host) return type;
         static std::atomic<std::uint64_t> placements{0}, placedBytes{0};
@@ -351,6 +357,13 @@ struct Context {
     }
 
     std::optional<std::uint32_t> HostMemoryType(std::uint32_t mask) const {
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((mask & (1u << i)) != 0 &&
+                (memory.memoryHeaps[memory.memoryTypes[i].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0 &&
+                (memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+                return i;
+            }
+        }
         for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
             if ((mask & (1u << i)) != 0 && (memory.memoryHeaps[memory.memoryTypes[i].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) return i;
         }

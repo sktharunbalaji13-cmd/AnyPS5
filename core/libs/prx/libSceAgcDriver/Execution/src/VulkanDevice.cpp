@@ -1551,7 +1551,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         // Imported pages are locked; locking is bounded by the process working-set minimum.
         if (const char* value = std::getenv("APS5_WORKING_SET_MIB"); value != nullptr && !compileOnly) {
             const SIZE_T bytes = static_cast<SIZE_T>(std::strtoull(value, nullptr, 10)) << 20u;
-            if (!SetProcessWorkingSetSizeEx(GetCurrentProcess(), bytes, bytes * 2, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE)) std::fprintf(stderr, "[gpu] SetProcessWorkingSetSizeEx failed: %lu\n", GetLastError());
+            if (bytes != 0 && !SetProcessWorkingSetSizeEx(GetCurrentProcess(), bytes, bytes * 2, QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE)) std::fprintf(stderr, "[gpu] SetProcessWorkingSetSizeEx failed: %lu\n", GetLastError());
         }
 #endif
         deviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
@@ -2443,6 +2443,11 @@ bool VulkanDevice::StoresPendingOver(std::uint64_t address, std::size_t bytes) c
 }
 
 int VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool reapFirst) {
+    if ((address & ~0xfffull) == 0x1100000000ull) {
+        std::uint32_t val = 0;
+        if (bytes.size() >= 4) std::memcpy(&val, bytes.data(), sizeof(val));
+        std::fprintf(stderr, "[label-sync] WriteLabelOnGpu queue 0x%x addr=0x%llx val=0x%x bytes=%zu\n", queue, static_cast<unsigned long long>(address), val, bytes.size());
+    }
     static const bool storeAtLabel = Graphics::StorageTexture::StoreAtLabelRequested(std::getenv("APS5_STORE_AT_LABEL"));
     if (storeAtLabel) Graphics::StorageTexture::FlushAllPending("label");
     Graphics::StorageTexture::StoreReadbackBeforeLabel("readback before label");
@@ -3251,7 +3256,10 @@ std::shared_ptr<Graphics::StorageTexture> PresentableResident(const Graphics::Co
     pending = resident != nullptr;
     convert = false;
     layer = 0;
-    if (resident == nullptr) return resident;
+    if (resident == nullptr) {
+        resident = Graphics::StorageTexture::FindLive(buffer.address, DisplayBufferSize(buffer));
+        if (resident == nullptr) return nullptr;
+    }
     const auto path = ResidentPresentable(context, *resident, buffer, filter, layer);
     if (path == ResidentPresent::None) resident.reset();
     convert = path == ResidentPresent::Convert;
@@ -3271,7 +3279,7 @@ bool ResidentServesDisplay(const Graphics::StorageTexture& resident, const Displ
         std::snprintf(message, sizeof(message), "VideoOut: display buffer 0x%llx reads register-clear DCC keys at 0x%llx over the pending image 0x%llx (DCC 0x%llx, filled keys %s): whether its results precede the clear is not modeled", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(buffer.dccAddress), static_cast<unsigned long long>(resident.Descriptor().baseAddress), static_cast<unsigned long long>(resident.Descriptor().dccAddress), Graphics::DccKeysName(resident.FilledKeys()));
         throw std::runtime_error(message);
     }
-    if (Graphics::IsDccClear(resident.FilledKeys()) && resident.FilledKeys() == keys) return false;
+    if (!resident.Dirty() && Graphics::IsDccClear(resident.FilledKeys()) && resident.FilledKeys() == keys) return false;
     return Graphics::KeysServeSurface(resident.Descriptor().dccAddress, resident.UploadedKeys(), resident.FilledKeys(), buffer.dccAddress, [&] { return ResidentKeys(resident); }, [&] { return keys; });
 }
 
@@ -3367,6 +3375,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
     // is blitted from that image, which skips the write-back retile, the 33 MB read of guest memory,
     // the upload and the detile dispatch. The deferred write-back stays pending as for any storage
     // image.
+    static int presentLogCount = 0;
     static std::uint64_t residentPresents = 0, refreshedPresents = 0, notPending = 0, unsuitable = 0, gpuDumps = 0;
     static auto lastReport = std::chrono::steady_clock::now();
     const auto bytes = DisplayBufferSize(buffer);
@@ -3381,10 +3390,9 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
             resident.reset();
             convert = false;
         }
-        if (!pending) {
-            ++notPending;
-        } else if (resident == nullptr) {
-            ++unsuitable;
+        if (resident == nullptr) {
+            if (!pending) ++notPending;
+            else ++unsuitable;
         } else {
             // 64 KiB blocks the CPU wrote since the image last matched guest memory would be shown
             // stale (the write-back keeps the CPU's bytes for them): Refresh merges them into the
@@ -3394,15 +3402,33 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
             static const bool noAdopt = std::getenv("APS5_NO_PRESENT_EPOCH") != nullptr;
             if (!noAdopt) GuestMemory::AdoptLatestCollectEpoch();
             GuestMemory::CollectWritesUncached(buffer.address, bytes);
-            if (!GuestMemory::UnchangedSince(buffer.address, bytes, resident->GenerationFor(buffer.address, bytes)) || (buffer.dccAddress != 0 && ResidentKeysMoved(*resident))) {
+            const bool uncachedUnchanged = GuestMemory::UnchangedSince(buffer.address, bytes, resident->GenerationFor(buffer.address, bytes));
+            if (!uncachedUnchanged) {
+                std::fprintf(stderr, "[present #%d] resident 0x%llx REFRESHING (gen=%llu, dirty=%d, bytes=%zu)\n",
+                             presentLogCount + 1, static_cast<unsigned long long>(buffer.address),
+                             static_cast<unsigned long long>(resident->GenerationFor(buffer.address, bytes)),
+                             resident->Dirty(), bytes);
                 if (resident->ImageLayers() > 1) resident->RefreshLayers(layer, 1);
                 else resident->Refresh();
                 ++refreshedPresents;
+            } else if (buffer.dccAddress != 0 && ResidentKeysMoved(*resident)) {
+                std::fprintf(stderr, "[present #%d] resident 0x%llx KEYS MOVED %s -> %s\n",
+                             presentLogCount + 1, static_cast<unsigned long long>(buffer.address),
+                             Graphics::DccKeysName(resident->UploadedKeys()),
+                             Graphics::DccKeysName(ResidentKeys(*resident)));
+                resident->SetUploadedKeys(ResidentKeys(*resident));
             }
             ++residentPresents;
         }
     }
     const auto cleared = buffer.dccAddress != 0 && resident == nullptr ? CompressedClearPixel(buffer, bytes) : std::nullopt;
+    if (++presentLogCount <= 120 || presentLogCount % 60 == 0) {
+        std::fprintf(stderr, "[present #%d] addr=0x%llx dcc=0x%llx %ux%u fmt=%u resident=%d (gen=%llu) cleared=%d\n",
+                     presentLogCount, static_cast<unsigned long long>(buffer.address),
+                     static_cast<unsigned long long>(buffer.dccAddress), buffer.width, buffer.height,
+                     static_cast<unsigned>(buffer.pixelFormat), resident != nullptr,
+                     static_cast<unsigned long long>(resident ? resident->Generation() : 0), cleared.has_value());
+    }
     bool dumpFrame = false;
     if (frameDumpOutput.Enabled_nid_no_patch() && dumps.dumped < dumps.limit && ++dumps.presents % static_cast<std::uint64_t>(dumps.every) == 0) {
         if (dumps.cpu || (passthrough && resident == nullptr)) {

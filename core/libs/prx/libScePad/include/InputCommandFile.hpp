@@ -28,7 +28,6 @@ public:
     };
 
     explicit InputCommandFile(const std::filesystem::path& path) : path(path) {
-        if (!this->path.empty()) lastSequence = read().sequence;
     }
 
     Input Poll(std::uint64_t now) {

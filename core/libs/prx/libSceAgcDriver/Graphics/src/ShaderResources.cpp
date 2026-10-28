@@ -1492,7 +1492,16 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
             }
         }
     }
-    std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept);
+    if (freed > 0) {
+        std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept);
+    } else {
+        static auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport >= std::chrono::seconds(5)) {
+            lastReport = now;
+            std::fprintf(stderr, "[gpu] texture caches released 0 MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept (throttled)\n", static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept);
+        }
+    }
     return freed;
 }
 
@@ -1693,6 +1702,15 @@ std::vector<VkDescriptorPoolSize> PoolSizes(std::span<const VkDescriptorSetLayou
     return sizes;
 }
 
+void reclaimMemoryForDescriptors(const Context& context, VkDeviceSize target = 64ULL << 20u) {
+    if (context.bufferPool != nullptr) {
+        context.bufferPool->ReclaimIdleDevice(target, std::chrono::steady_clock::now());
+    }
+    if (context.cacheReclaim != nullptr) {
+        context.cacheReclaim(target, false);
+    }
+}
+
 VkDescriptorPool CreateSetPool(const Context& context, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind) {
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     info.flags = updateAfterBind ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0;
@@ -1700,7 +1718,12 @@ VkDescriptorPool CreateSetPool(const Context& context, std::span<const VkDescrip
     info.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
     info.pPoolSizes = sizes.data();
     VkDescriptorPool pool = VK_NULL_HANDLE;
-    Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &info, nullptr, &pool), "vkCreateDescriptorPool");
+    auto result = context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &info, nullptr, &pool);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        reclaimMemoryForDescriptors(context);
+        result = context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &info, nullptr, &pool);
+    }
+    Check(result, "vkCreateDescriptorPool");
     return pool;
 }
 
@@ -2198,7 +2221,12 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             allocation.descriptorSetCount = 1;
             allocation.pSetLayouts = &layout;
             VkDescriptorSet set = VK_NULL_HANDLE;
-            Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &set), "vkAllocateDescriptorSets");
+            auto result = context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &set);
+            if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+                reclaimMemoryForDescriptors(context);
+                result = context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &set);
+            }
+            Check(result, "vkAllocateDescriptorSets");
             return set;
         };
         const auto createLayout = [&](const std::vector<std::uint32_t>& key, const std::vector<VkDescriptorSetLayoutBinding>& description, const std::vector<VkDescriptorBindingFlags>& flags, bool& owns) {
@@ -2266,7 +2294,12 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                 allocation.descriptorPool = pool;
                 allocation.descriptorSetCount = 1;
                 allocation.pSetLayouts = &_layout;
-                Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &_set), "vkAllocateDescriptorSets");
+                auto result = context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &_set);
+                if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+                    reclaimMemoryForDescriptors(context);
+                    result = context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &_set);
+                }
+                Check(result, "vkAllocateDescriptorSets");
             }
         }
         writeOnlyRanges.clear();
@@ -4237,7 +4270,11 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         const auto pool = CreateSetPool(context, sizes, updateAfterBind);
         allocation.descriptorPool = pool;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        const auto result = allocate(context.device, &allocation, &set);
+        auto result = allocate(context.device, &allocation, &set);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+            reclaimMemoryForDescriptors(context);
+            result = allocate(context.device, &allocation, &set);
+        }
         if (result != VK_SUCCESS) {
             destroyPool(context.device, pool, nullptr);
             Check(result, "vkAllocateDescriptorSets");
@@ -4253,13 +4290,22 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         if (pool.exhausted) continue;
         allocation.descriptorPool = pool.handle;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        const auto result = allocate(context.device, &allocation, &set);
+        auto result = allocate(context.device, &allocation, &set);
         if (result == VK_SUCCESS) {
             ++stats.sets;
             ++pool.liveSets;
             return {set, pool.handle, index - 1, updateAfterBind, VK_NULL_HANDLE, {}, variableCount, {}};
         }
-        if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL) Check(result, "vkAllocateDescriptorSets");
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+            reclaimMemoryForDescriptors(context);
+            result = allocate(context.device, &allocation, &set);
+            if (result == VK_SUCCESS) {
+                ++stats.sets;
+                ++pool.liveSets;
+                return {set, pool.handle, index - 1, updateAfterBind, VK_NULL_HANDLE, {}, variableCount, {}};
+            }
+        }
+        if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL && result != VK_ERROR_OUT_OF_DEVICE_MEMORY && result != VK_ERROR_OUT_OF_HOST_MEMORY) Check(result, "vkAllocateDescriptorSets");
         pool.exhausted = true;
     }
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -4270,12 +4316,22 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
     poolInfo.pPoolSizes = ChainPoolCreateSizes.data();
     chain.reserve(chain.size() + 1);
     VkDescriptorPool pool = VK_NULL_HANDLE;
-    Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
+    auto createResult = context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool);
+    if (createResult == VK_ERROR_OUT_OF_DEVICE_MEMORY || createResult == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        reclaimMemoryForDescriptors(context);
+        createResult = context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool);
+    }
+    Check(createResult, "vkCreateDescriptorPool");
     chain.push_back({pool});
     ++stats.pools;
     allocation.descriptorPool = pool;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    Check(allocate(context.device, &allocation, &set), "vkAllocateDescriptorSets");
+    auto allocResult = allocate(context.device, &allocation, &set);
+    if (allocResult == VK_ERROR_OUT_OF_DEVICE_MEMORY || allocResult == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        reclaimMemoryForDescriptors(context);
+        allocResult = allocate(context.device, &allocation, &set);
+    }
+    Check(allocResult, "vkAllocateDescriptorSets");
     chain.back().liveSets = 1;
     ++stats.sets;
     return {set, pool, chain.size() - 1, updateAfterBind, VK_NULL_HANDLE, {}, variableCount, {}};
@@ -5809,6 +5865,10 @@ void ShaderResources::MarkGpuWrites(Recorder& recorder) {
     if (SkipWriteBack()) return;
     for (std::size_t index = 0; index < storageTextures.size(); ++index) {
         if (!storageWritten[index] || storageTextures[index] == nullptr) continue;
+        const auto addr = storageTextures[index]->Descriptor().baseAddress;
+        if (addr == 0x1504910000 || addr == 0x1506940000) {
+            std::fprintf(stderr, "[cs-target 0x%llx] compute write!\n", static_cast<unsigned long long>(addr));
+        }
         storageTextures[index]->MarkDirty();
         static_cast<void>(DepthSurfaceStoreBack(context, *storageTextures[index]));
     }

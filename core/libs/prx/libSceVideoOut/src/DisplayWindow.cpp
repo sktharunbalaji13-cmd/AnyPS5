@@ -51,6 +51,15 @@ void DisplayWindow::Ensure(std::uint32_t sourceWidth, std::uint32_t sourceHeight
 }
 
 void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
+#ifdef _WIN32
+    if (auto defaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL); defaultDesk != nullptr) {
+        if (!SetThreadDesktop(defaultDesk)) {
+            std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) failed in DisplayWindow::create: %lu\n", GetLastError());
+        } else {
+            std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) succeeded in DisplayWindow::create\n");
+        }
+    }
+#endif
     SDL_Rect usable{};
     require(SDL_GetDisplayUsableBounds(0, &usable) == 0, SDL_GetError());
     require(DisplayWindowInitialSizePercent > 0 && DisplayWindowInitialSizePercent <= 100, "initial window size percent must be between 1 and 100");
@@ -64,6 +73,23 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());
+#ifdef _WIN32
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(window, &info) == SDL_TRUE && info.subsystem == SDL_SYSWM_WINDOWS) {
+        ShowWindow(info.info.win.window, SW_RESTORE);
+        SetWindowPos(info.info.win.window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        BringWindowToTop(info.info.win.window);
+        SetForegroundWindow(info.info.win.window);
+        if (auto user32 = GetModuleHandleW(L"user32.dll")) {
+            using PFN_SwitchToThisWindow = void (WINAPI*)(HWND, BOOL);
+            if (auto pfn = reinterpret_cast<PFN_SwitchToThisWindow>(GetProcAddress(user32, "SwitchToThisWindow"))) {
+                pfn(info.info.win.window, TRUE);
+            }
+        }
+        std::fprintf(stderr, "[videoout] Window 0x%p brought to top on Default desktop\n", info.info.win.window);
+    }
+#endif
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     applyAppIcon(window);
     installSubclass();
@@ -122,6 +148,17 @@ void DisplayWindow::UpdateTitle() {
     char text[160];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
     SDL_SetWindowTitle(window, text);
+#ifdef _WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(window, &wmInfo) == SDL_TRUE && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+        HWND hwnd = wmInfo.info.win.window;
+        if (IsIconic(hwnd)) {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        }
+    }
+#endif
     if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr && (frameNum == 1 || frameNum % 30 == 0)) telemetry->EmitPresent(frameNum, currentFps);
 }
 
@@ -179,6 +216,9 @@ void DisplayWindow::applyAspectRatio(void* hwnd, std::uintptr_t edge, void* rect
 std::intptr_t DisplayWindow::windowProc(void* hwnd, unsigned int message, std::uintptr_t wParam, std::intptr_t lParam, std::uintptr_t subclassId, std::uintptr_t referenceData) {
 #ifdef _WIN32
     static_cast<void>(subclassId);
+    if (message == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_MINIMIZE) {
+        return 0;
+    }
     if (message == WM_SIZING) {
         reinterpret_cast<const DisplayWindow*>(referenceData)->applyAspectRatio(hwnd, wParam, reinterpret_cast<void*>(lParam));
         return TRUE;
