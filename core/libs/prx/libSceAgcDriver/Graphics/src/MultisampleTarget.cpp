@@ -1586,30 +1586,4 @@ std::vector<MultisampleColorAlias> MultisampleColorTargetsOver(std::uint64_t add
     return aliases;
 }
 
-std::optional<MultisampleColorAlias> MultisampleColorTargetOver(std::uint64_t address, std::size_t bytes) {
-    const auto aliases = MultisampleColorTargetsOver(address, bytes);
-    if (aliases.empty()) return std::nullopt;
-    return aliases.front();
-}
-
-std::vector<MultisampleColorAlias> MultisampleColorTargetsOver(std::uint64_t address, std::size_t bytes) {
-    std::vector<MultisampleColorAlias> aliases;
-    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return aliases;
-    std::lock_guard lock(targetsMutex());
-    std::shared_lock guardLock(guardedMutex());
-    for (const auto& range : guarded()) {
-        if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
-        if (std::any_of(aliases.begin(), aliases.end(), [&](const MultisampleColorAlias& alias) { return alias.active == range.active; })) continue;
-        const auto target = std::find_if(targets().begin(), targets().end(), [&](const auto& candidate) { return candidate->active == range.active; });
-        if (target != targets().end()) {
-            aliases.push_back((*target)->Alias());
-            continue;
-        }
-        MultisampleColorAlias alias{range.address, range.bytes, VK_FORMAT_UNDEFINED, range.samples};
-        alias.active = range.active;
-        aliases.push_back(alias);
-    }
-    return aliases;
-}
-
 }
