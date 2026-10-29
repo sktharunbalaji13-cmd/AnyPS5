@@ -3307,6 +3307,7 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     set_tests_properties(agc_driver_queued_index_read_order PROPERTIES TIMEOUT 60)
+    set_property(TEST agc_driver_compute_prebuild_share APPEND PROPERTY ENVIRONMENT "APS5_PREBUILD_THREADS=4")
 
     foreach(agcTest IN ITEMS agc_spirv_narrow_constant_store_tests agc_spirv13_image_tests agc_spirv_optimizer_tests agc_driver_constant_store_tests)
         if(NOT TARGET ${agcTest})
