@@ -5276,7 +5276,10 @@ void GuestBufferMemory::resolveOverlays() {
         if (regions[index].overlay) members.push_back(index);
     }
     if (members.empty()) return;
-    std::vector<bool> drop(regions.size(), space == nullptr);
+    std::vector<bool> drop(regions.size(), false);
+    if (space == nullptr) {
+        for (const auto member : members) drop[member] = true;
+    }
     std::sort(members.begin(), members.end(), [&](std::size_t left, std::size_t right) { return regions[left].begin < regions[right].begin; });
     for (std::size_t first = 0; space != nullptr && first < members.size();) {
         Region cluster{regions[members[first]].begin, regions[members[first]].end, true, {}, nullptr};
@@ -6335,7 +6338,10 @@ void GuestBufferMemory::addAddressStoreSpans() {
         for (const auto& [first, last] : clipPieces(region.mirror->committed, region.begin, served)) writes.emplace_back(first, last);
     };
     if (space != nullptr) {
-        for (const auto& region : space->base) add(region);
+        for (const auto& region : space->base) {
+            if (region.mirror != nullptr && !region.mirror->sparse && (servedEnd(region) - region.begin) > (256ull << 20)) continue;
+            add(region);
+        }
     }
     for (const auto& region : regions) add(region);
 }
