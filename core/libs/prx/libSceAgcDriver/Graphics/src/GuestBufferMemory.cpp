@@ -5700,6 +5700,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
     }
     if (heapsEnd > heapsBegin) StorageTexture::PublishShadowsOnly(heapsBegin, static_cast<std::size_t>(heapsEnd - heapsBegin), PublishScope::Whole, "address-based heaps");
     if (!gpuCopies.empty()) recordGpuCopies(gpuCopies, addressable);
+    addAddressStoreSpans();
     takeHeapReferences();
     ResidentBuffer::FlushChanged(context);
     if (!profile) return;
@@ -6319,6 +6320,24 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> mergeWrites(std::vector<std
     return merged;
 }
 
+}
+
+void GuestBufferMemory::addAddressStoreSpans() {
+    if (!addressStores) return;
+    const auto add = [&](const Region& region) {
+        if (region.mirror == nullptr || !region.mirror->heap || !region.mirror->writable || !region.writable) return;
+        const auto served = servedEnd(region);
+        if (region.begin >= served) return;
+        if (!region.mirror->sparse) {
+            writes.emplace_back(region.begin, served);
+            return;
+        }
+        for (const auto& [first, last] : clipPieces(region.mirror->committed, region.begin, served)) writes.emplace_back(first, last);
+    };
+    if (space != nullptr) {
+        for (const auto& region : space->base) add(region);
+    }
+    for (const auto& region : regions) add(region);
 }
 
 void GuestBufferMemory::takeHeapReferences() {
