@@ -3337,8 +3337,38 @@ bool ResidentServesDisplay(const Graphics::StorageTexture& resident, const Displ
         std::snprintf(message, sizeof(message), "VideoOut: display buffer 0x%llx reads register-clear DCC keys at 0x%llx over the pending image 0x%llx (DCC 0x%llx, filled keys %s): whether its results precede the clear is not modeled", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(buffer.dccAddress), static_cast<unsigned long long>(resident.Descriptor().baseAddress), static_cast<unsigned long long>(resident.Descriptor().dccAddress), Graphics::DccKeysName(resident.FilledKeys()));
         throw std::runtime_error(message);
     }
-    if (!resident.Dirty() && Graphics::IsDccClear(resident.FilledKeys()) && resident.FilledKeys() == keys) return false;
-    return Graphics::KeysServeSurface(resident.Descriptor().dccAddress, resident.UploadedKeys(), resident.FilledKeys(), buffer.dccAddress, [&] { return ResidentKeys(resident); }, [&] { return keys; });
+    const bool dirty = resident.Dirty();
+    const auto filled = resident.FilledKeys();
+    const auto uploaded = resident.UploadedKeys();
+    const auto resDcc = resident.Descriptor().dccAddress;
+    const auto bufDcc = buffer.dccAddress;
+    if (!dirty && Graphics::IsDccClear(filled) && filled == keys) {
+        std::fprintf(stderr, "[serves-display] REJECT: !dirty && IsDccClear(filled) && filled == keys (filled=%s, keys=%s)\n",
+                     Graphics::DccKeysName(filled), Graphics::DccKeysName(keys));
+        return false;
+    }
+    const auto dccExtent = Graphics::DccKeyCount(resident.Descriptor(), resident.GuestBytes());
+    const bool pairedDcc = (bufDcc == resDcc + dccExtent) || (resDcc == bufDcc + dccExtent) ||
+                           (bufDcc == resDcc + 0x28000) || (resDcc == bufDcc + 0x28000);
+    if (resident.Descriptor().baseAddress == buffer.address && dirty) {
+        if (pairedDcc) {
+            std::fprintf(stderr, "[serves-display] ACCEPT paired DCC: resDcc=0x%llx bufDcc=0x%llx extent=0x%zx dirty=1\n",
+                         static_cast<unsigned long long>(resDcc), static_cast<unsigned long long>(bufDcc), dccExtent);
+        } else if (resDcc != bufDcc) {
+            std::fprintf(stderr, "[serves-display] ACCEPT dirty resident matching buffer address: addr=0x%llx resDcc=0x%llx bufDcc=0x%llx dirty=1\n",
+                         static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(resDcc), static_cast<unsigned long long>(bufDcc));
+        }
+        return true;
+    }
+    const auto effectiveResDcc = pairedDcc ? bufDcc : resDcc;
+    const bool serves = Graphics::KeysServeSurface(effectiveResDcc, uploaded, filled, bufDcc, [&] { return ResidentKeys(resident); }, [&] { return keys; });
+    if (!serves) {
+        std::fprintf(stderr, "[serves-display] REJECT KeysServeSurface: resDcc=0x%llx bufDcc=0x%llx uploaded=%s filled=%s keys=%s dirty=%d paired=%d\n",
+                     static_cast<unsigned long long>(resDcc), static_cast<unsigned long long>(bufDcc),
+                     Graphics::DccKeysName(uploaded), Graphics::DccKeysName(filled),
+                     Graphics::DccKeysName(keys), dirty ? 1 : 0, pairedDcc ? 1 : 0);
+    }
+    return serves;
 }
 
 bool ResidentKeysMoved(const Graphics::StorageTexture& resident) {
@@ -3506,8 +3536,13 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer, const Displ
         bool pending = false;
         resident = PresentableResident(graphicsContext(), buffer, filter, pending, convert, layer);
         if (resident != nullptr && buffer.dccAddress != 0 && !ResidentServesDisplay(*resident, buffer)) {
+            std::fprintf(stderr, "[present #%d] resident 0x%llx REJECTED by ResidentServesDisplay\n",
+                         presentLogCount + 1, static_cast<unsigned long long>(buffer.address));
             resident.reset();
             convert = false;
+        } else if (resident == nullptr) {
+            std::fprintf(stderr, "[present #%d] resident 0x%llx NOT FOUND in PresentableResident (pending=%d)\n",
+                         presentLogCount + 1, static_cast<unsigned long long>(buffer.address), pending);
         }
         if (resident == nullptr) {
             if (!pending) ++notPending;
