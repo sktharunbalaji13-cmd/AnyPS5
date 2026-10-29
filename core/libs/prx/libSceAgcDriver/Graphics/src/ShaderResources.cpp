@@ -813,12 +813,12 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         return native;
     }
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
-    RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
-    if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
         logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
         return depth;
     }
+    RequireNoMultisampleTarget(resource.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a texture read");
+    if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
     constexpr auto float32 = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format32Float);
     if (depthBitsWidth == 32u && resource.format != float32) {
@@ -1280,8 +1280,8 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     if (viewed.baseAddress != requested.baseAddress) guestBytes = 0;
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     const auto viewedBytes = guestBytes != 0 ? guestBytes : DescribeSurface(viewed).guestBytes;
-    RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
     if (auto depth = DepthSurfaceStorage(context, words, viewed, mip)) return depth;
+    RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
     if (viewedBytes >= (1ull << 30u)) {
         static std::atomic<std::uint64_t> large{0};
         const auto count = large.fetch_add(1) + 1;
@@ -1650,8 +1650,8 @@ std::shared_ptr<StorageTexture> RepeatStorageSurface(const Context& context, con
     const auto viewed = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     const auto viewedBytes = DescribeSurface(viewed).guestBytes;
-    RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
     if (DepthSurfaceStorage(context, {}, viewed, 0) != nullptr) return nullptr;
+    RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
     if (DepthPlanesStale()) static_cast<void>(FlushDepthPlanes(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), DepthPlaneScope::Overlapped));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
     const bool profile = LookupOutcomes::Profiled();

@@ -2601,15 +2601,6 @@ std::uint64_t blockBytes(const GuestRuns& runs) {
 void reserveHeapBytes(std::uint64_t address, std::uint64_t bytes, std::uint64_t need) {
     auto& state = Mirrors();
     for (int attempt = 0;; ++attempt) {
-        {
-            std::lock_guard lock(state.mutex);
-            std::uint64_t held = state.heapBytes;
-            if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
-            if (held + need <= heapMirrorBudget()) {
-                state.heapBytes += need;
-                return;
-            }
-        }
         if (auto dropped = Spaces().current.exchange(nullptr)) {
             // Drop cached previous AddressSpace to release stale mirror references
         }
@@ -2618,38 +2609,38 @@ void reserveHeapBytes(std::uint64_t address, std::uint64_t bytes, std::uint64_t 
             std::lock_guard lock(state.mutex);
             std::uint64_t held = state.heapBytes;
             if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
+            if (held + need > heapMirrorBudget()) {
+                // Evict idle heap mirrors (use_count <= 1) whose memory is not held by active work
+                std::size_t evicted = 0;
+                std::uint64_t evictedBytes = 0;
+                for (auto it = state.entries.begin(); it != state.entries.end();) {
+                    if (it->first != address && it->second->heap && it->second.use_count() <= 1) {
+                        evictedBytes += it->second->accounted;
+                        unlistMirror(state, *it->second);
+                        it = state.entries.erase(it);
+                        ++state.version;
+                        ++evicted;
+                        held = state.heapBytes;
+                        if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
+                        if (held + need <= heapMirrorBudget()) break;
+                    } else {
+                        ++it;
+                    }
+                }
+                if (evicted != 0) {
+                    std::fprintf(stderr, "[gpu] reserveHeapBytes: evicted %zu idle heap mirrors (%llu MiB) for 0x%llx+0x%llx (need=%llu MiB, held now=%llu MiB of %llu MiB)\n",
+                        evicted, static_cast<unsigned long long>(evictedBytes >> 20u),
+                        static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
+                        static_cast<unsigned long long>(need >> 20u),
+                        static_cast<unsigned long long>(state.heapBytes >> 20u),
+                        static_cast<unsigned long long>(heapMirrorBudget() >> 20u));
+                }
+            }
+            held = state.heapBytes;
+            if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
             if (held + need <= heapMirrorBudget()) {
                 state.heapBytes += need;
                 return;
-            }
-            // Evict idle heap mirrors (use_count <= 1) whose memory is not held by active work
-            std::size_t evicted = 0;
-            std::uint64_t evictedBytes = 0;
-            for (auto it = state.entries.begin(); it != state.entries.end();) {
-                if (it->first != address && it->second->heap && it->second.use_count() <= 1) {
-                    evictedBytes += it->second->accounted;
-                    unlistMirror(state, *it->second);
-                    it = state.entries.erase(it);
-                    ++state.version;
-                    ++evicted;
-                    if (state.heapBytes + need <= heapMirrorBudget()) break;
-                } else {
-                    ++it;
-                }
-            }
-            if (evicted != 0) {
-                std::fprintf(stderr, "[gpu] reserveHeapBytes: evicted %zu idle heap mirrors (%llu MiB) for 0x%llx+0x%llx (need=%llu MiB, held now=%llu MiB of %llu MiB)\n",
-                    evicted, static_cast<unsigned long long>(evictedBytes >> 20u),
-                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
-                    static_cast<unsigned long long>(need >> 20u),
-                    static_cast<unsigned long long>(state.heapBytes >> 20u),
-                    static_cast<unsigned long long>(heapMirrorBudget() >> 20u));
-                held = state.heapBytes;
-                if (const auto found = state.entries.find(address); found != state.entries.end() && found->second->heap && found->second->listed) held -= found->second->accounted;
-                if (held + need <= heapMirrorBudget()) {
-                    state.heapBytes += need;
-                    return;
-                }
             }
             if (attempt != 0) throw std::runtime_error(heapMirrorError(address, bytes, held, "past the budget"));
         }
@@ -5511,7 +5502,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
     if (space != nullptr) completeSpaceWrites();
     uploaded = true;
     for (const auto& region : regions) static_cast<void>(FlushDepthPlanes(region.begin, static_cast<std::size_t>(region.end - region.begin)));
-    for (const auto& [begin, end] : writes) RequireNoResidentDepthRead_nid_no_patch(begin, static_cast<std::size_t>(end - begin));
+    for (const auto& [begin, end] : writes) RetireResidentDepth_nid_no_patch(begin, static_cast<std::size_t>(end - begin));
     for (const auto& [begin, end] : writes) StorageTexture::FlushPending(begin, static_cast<std::size_t>(end - begin), nullptr, "written buffer range");
     if (context.hostImportAlignment != 0) {
         auto& state = Imports();

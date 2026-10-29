@@ -406,7 +406,7 @@ public:
             context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
             VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             allocation.allocationSize = requirements.size;
-            allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "depth surface");
             memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory depth target");
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory depth");
             if (target.samples != 1u) owned = std::make_shared<OwnedImage>(this->context, image, memory);
@@ -478,7 +478,7 @@ public:
         }
         if (stencilClearGeneration != 0u) {
             auto& plane = sampling.initial[2];
-            const bool gpuFill = stencilFillNote != 0u && (queuedStencilFill || newestStencilNote == 0u);
+            const bool gpuFill = stencilClearValue.has_value() && (newestStencilNote == 0u || (stencilFillNote != 0u && queuedStencilFill));
             Require(GuestMemory::UnchangedSinceCollected(plane.address, plane.bytes, stencilClearGeneration), "CPU writes raced native multisample stencil plane fill");
             if (planeAliased) sampling.aliasStencil = *stencilClearValue;
             else Require(gpuFill || GuestMemory::StoredAllSince_nid_no_patch(plane.address, plane.bytes, stencilClearGeneration), "native multisample stencil plane fill has no complete tracked store");
@@ -496,7 +496,7 @@ public:
         }
         if (clearGeneration != 0u) {
             const auto& metadata = sampling.initial[1];
-            const bool gpuFill = clearPattern.has_value() && clearFillNote != 0u && (queuedFill || newestHtileNote == 0u);
+            const bool gpuFill = clearPattern.has_value() && (newestHtileNote == 0u || (clearFillNote != 0u && queuedFill));
             for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
                 const auto& plane = sampling.initial[index];
                 if (index == 0u && sampling.depthAlias && sameDepthAlias(*sampling.depthAlias, plane)) continue;
@@ -1270,7 +1270,7 @@ private:
             context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
             VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             allocation.allocationSize = requirements.size;
-            allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "depth surface");
             Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory sampled depth shadow");
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory sampled depth shadow");
             sampleShadow = std::make_shared<OwnedImage>(context, image, memory);
@@ -1343,7 +1343,7 @@ private:
                 context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, stencilCopy.image, &requirements);
                 VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
                 allocation.allocationSize = requirements.size;
-                allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "depth surface");
                 stencilCopy.memory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory stencil copy");
                 Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, stencilCopy.image, stencilCopy.memory, 0), "vkBindImageMemory stencil copy");
                 stencilCopy.staging = std::make_unique<DeviceBuffer>(context, static_cast<std::size_t>(target.extent.width) * target.extent.height, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -1539,7 +1539,7 @@ public:
             context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
             VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             allocation.allocationSize = requirements.size;
-            allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "depth surface");
             owned->Allocate(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory depth plane copy");
             memory = owned->memory;
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory depth plane copy");
@@ -2259,6 +2259,22 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
     for (const auto& range : depthGuards()) {
         if (overlaps(range)) Require(!range.hostWritten->load(std::memory_order_acquire), "sample-preserving guest publication of native multisample depth is not implemented");
     }
+    for (const auto& range : depthGuards()) {
+        if (overlaps(range)) range.active->store(false, std::memory_order_release);
+    }
+    std::erase_if(depthGuards(), [](const auto& range) { return !range.active->load(std::memory_order_acquire); });
+    anyDepthGuard().store(!depthGuards().empty(), std::memory_order_release);
+}
+
+void RetireResidentDepth_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u || !anyDepthGuard().load(std::memory_order_acquire)) return;
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "native depth release range overflows");
+    const auto overlaps = [&](const DepthGuard& range) { return address < range.address + range.bytes && range.address < address + bytes; };
+    {
+        std::shared_lock lock(depthGuardMutex());
+        if (std::ranges::none_of(depthGuards(), overlaps)) return;
+    }
+    std::unique_lock lock(depthGuardMutex());
     for (const auto& range : depthGuards()) {
         if (overlaps(range)) range.active->store(false, std::memory_order_release);
     }

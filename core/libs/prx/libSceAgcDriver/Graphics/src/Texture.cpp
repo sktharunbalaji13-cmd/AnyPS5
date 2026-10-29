@@ -719,7 +719,7 @@ if (TraceTextureDescriptors()) AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx 
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         owned->Allocate(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory repacked copy", true);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0), "vkBindImageMemory repacked copy");
 
@@ -778,7 +778,7 @@ if (TraceTextureDescriptors()) AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx 
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         owned->Allocate(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory block copy", true);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0), "vkBindImageMemory block copy");
 
@@ -837,7 +837,7 @@ if (TraceTextureDescriptors()) AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx 
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         owned->Allocate(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory depth copy", true);
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0), "vkBindImageMemory depth copy");
 
@@ -1875,7 +1875,7 @@ bool ClearKeepsDenormals(const Context& context, VkFormat format) {
         context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory denormal clear probe");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory denormal clear probe");
         Buffer readback(context, elementBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -2012,7 +2012,7 @@ VkImageView StorageTexture::AttachmentProxyView() {
         context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, proxyImage, &requirements);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         proxyMemory = AllocateImageMemory(context, allocation, requirements.memoryTypeBits, "vkAllocateMemory attachment proxy");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, proxyImage, proxyMemory, 0), "vkBindImageMemory attachment proxy");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -3935,6 +3935,13 @@ void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count)
         }
     }
     if (anyUnsaved && !GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) captureGuestBytes(&unsaved);
+    if (anyUnsaved) {
+        const auto now = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+        for (std::uint32_t layer = first; layer < first + count; ++layer) {
+            if (unsaved[layer]) layerGeneration[layer] = collectedLayerGeneration(layer, now);
+        }
+        refreshGeneration();
+    }
     for (std::uint32_t layer = first; layer < first + count; ++layer) {
         if (!layerPending[layer] && !completionKept.empty()) {
             const auto end = layerBegin(layer) + layerBytes(layer);

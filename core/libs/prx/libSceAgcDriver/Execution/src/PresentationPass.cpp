@@ -303,7 +303,7 @@ void PresentationPass::ensureUploadImage(Slot& slot, VkExtent2D extent) {
         context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, slot.uploadImage, &requirements);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "presentation pass");
         Graphics::Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &slot.uploadMemory), "vkAllocateMemory presentation upload");
         Graphics::Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, slot.uploadImage, slot.uploadMemory, 0), "vkBindImageMemory presentation upload");
         slot.uploadTexels = std::make_unique<Graphics::Buffer>(context, static_cast<std::size_t>(extent.width) * extent.height * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -436,7 +436,7 @@ void PresentationPass::ensureDumpTarget(Slot& slot, VkExtent2D extent) {
         context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, slot.dumpImage, &requirements);
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "presentation pass");
         Graphics::Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &slot.dumpMemory), "vkAllocateMemory presentation dump");
         Graphics::Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, slot.dumpImage, slot.dumpMemory, 0), "vkBindImageMemory presentation dump");
         slot.dumpView = createView(slot.dumpImage, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
