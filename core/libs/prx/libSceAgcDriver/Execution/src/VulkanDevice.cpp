@@ -3514,8 +3514,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer, const Displ
             else ++unsuitable;
         } else {
             if (RefreshPresented(*resident, buffer, layer)) {
-                std::fprintf(stderr, "[present #%d] resident 0x%llx REFRESHED
-",
+                std::fprintf(stderr, "[present #%d] resident 0x%llx REFRESHED\n",
                              presentLogCount + 1, static_cast<unsigned long long>(buffer.address));
                 ++refreshedPresents;
             }

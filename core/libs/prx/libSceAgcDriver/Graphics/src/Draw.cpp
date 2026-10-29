@@ -1991,20 +1991,17 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
         if (residents[index] == nullptr) continue;
         const auto addr = residents[index]->Descriptor().baseAddress;
         if (addr == 0x1504910000 || addr == 0x1506940000) {
-            std::fprintf(stderr, "[draw-target 0x%llx] raster draw write! sampled_textures=%zu
-",
+            std::fprintf(stderr, "[draw-target 0x%llx] raster draw write! sampled_textures=%zu\n",
                          static_cast<unsigned long long>(addr), resources->SampledTextures().size());
             for (const auto& tex : resources->SampledTextures()) {
                 if (tex != nullptr) {
                     if (tex->StorageSource() != nullptr) {
-                        std::fprintf(stderr, "   [sampled-storage 0x%llx] %ux%u fmt=%u
-",
+                        std::fprintf(stderr, "   [sampled-storage 0x%llx] %ux%u fmt=%u\n",
                                      static_cast<unsigned long long>(tex->StorageSource()->Descriptor().baseAddress),
                                      tex->StorageSource()->Descriptor().width, tex->StorageSource()->Descriptor().height,
                                      static_cast<unsigned>(tex->StorageSource()->Descriptor().format));
                     } else {
-                        std::fprintf(stderr, "   [sampled-tex fmt=%d bytes=%llu]
-",
+                        std::fprintf(stderr, "   [sampled-tex fmt=%d bytes=%llu]\n",
                                      static_cast<int>(tex->ViewFormat()), static_cast<unsigned long long>(tex->AllocationBytes()));
                     }
                 }

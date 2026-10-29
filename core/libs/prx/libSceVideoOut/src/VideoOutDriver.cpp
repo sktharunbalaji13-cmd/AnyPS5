@@ -305,14 +305,11 @@ VideoOutDriver::VideoOutDriver() {
     OnMainThread([] {
         SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #ifdef _WIN32
-#ifdef _WIN32
         if (auto defaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL); defaultDesk != nullptr) {
             if (!SetThreadDesktop(defaultDesk)) {
-                std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) failed during VideoOutDriver init: %lu
-", GetLastError());
+                std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) failed during VideoOutDriver init: %lu\n", GetLastError());
             } else {
-                std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) succeeded during VideoOutDriver init
-");
+                std::fprintf(stderr, "[videoout] SetThreadDesktop(Default) succeeded during VideoOutDriver init\n");
             }
         }
         SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
@@ -785,45 +782,8 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 } catch (const ProcessShutdown&) {
                     throw;
                 } catch (const std::exception& error) {
-                    std::fprintf(stderr, "[videoout] presentation flip dropped: %s
-", error.what());
+                    std::fprintf(stderr, "[videoout] presentation flip dropped: %s\n", error.what());
                     std::fflush(stderr);
-                } catch (...) {
-                    std::fprintf(stderr, "[videoout] presentation flip dropped with non-standard exception
-");
-                    std::fflush(stderr);
-                }
-                if (flipSuccess && window.Handle() != nullptr) {
-                    int windowWidth = 0;
-                    int windowHeight = 0;
-                    OnMainThread([&] { SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight); });
-                    if (windowWidth > 0 && windowHeight > 0) {
-                        const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
-                        if (mouseInput) mouseInput->SetPresentation(current->width, current->height, presented.width, presented.height);
-                    }
-                }
-                const auto finished = AgcDriver::FrameTiming::Clock::now();
-                AgcDriver::FrameTiming::Clock::duration interval{};
-                std::lock_guard lock(current->cfg->mutex);
-                    if (!current->cfg->Closed()) {
-                        current->gpuComplete = true;
-                        triggerEvents(*current->cfg, VIDEO_OUT_EVENT_FLIP, reinterpret_cast<void*>(current->flipArg));
-                        ++current->cfg->flipStatus.count;
-                        current->cfg->flipStatus.processTime = sceKernelGetProcessTime();
-                        current->cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
-                        current->cfg->flipStatus.flipArg = current->flipArg;
-                        const auto previous = current->cfg->flipStatus.currentBuffer;
-                        if (previous >= 0) {
-                            auto& label = current->cfg->bufferLabels[previous];
-                            AgcDriverStoreGuestLabel_nid_postfix(&label, 0);
-                        }
-                        current->cfg->flipStatus.currentBuffer = current->index;
-                        current->cfg->width = current->width;
-                        current->cfg->height = current->height;
-                        --current->cfg->flipStatus.flipPendingNum;
-                        --current->queue->reservations;
-                        current->cfg->vblankCond.notify_all();
-                    }
                 } catch (...) {
                     std::fprintf(stderr, "[videoout] presentation flip dropped with non-standard exception\n");
                     std::fflush(stderr);
@@ -831,10 +791,10 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 if (flipSuccess) {
                     int windowWidth = 0;
                     int windowHeight = 0;
-                    if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                    if (window.Handle() != nullptr) OnMainThread([&] { SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight); });
                     if (windowWidth > 0 && windowHeight > 0) {
                         const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
-                        mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+                        if (mouseInput) mouseInput->SetPresentation(current->width, current->height, presented.width, presented.height);
                     }
                     const auto finished = AgcDriver::FrameTiming::Clock::now();
                     AgcDriver::FrameTiming::Clock::duration interval{};
