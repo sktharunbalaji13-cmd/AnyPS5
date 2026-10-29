@@ -507,10 +507,7 @@ public:
             auto current = sampling.initial;
             current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
             std::vector<std::uint32_t> words(queuedFill ? 1u : metadata.bytes / sizeof(std::uint32_t), queuedFill ? *clearPattern : 0u);
-            if (!queuedFill) {
-                std::memcpy(words.data(), reinterpret_cast<const void*>(metadata.address), metadata.bytes);
-                Require(target.htilePipeAligned ? HtileProvesClear(words, clearPatternWord) : HtileDepthOnlyProvesClear(words, clearPatternWord), "native multisample depth clear does not prove clear");
-            }
+            if (!queuedFill) std::memcpy(words.data(), reinterpret_cast<const void*>(metadata.address), metadata.bytes);
             for (const auto word : words) {
                 Require(htileProvesClear(word, target.htileDepthOnly, clearDepth), "native multisample depth completed HTILE does not prove its clear value");
                 Require((clearAspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u || htileProvesStencilClear(word), "native multisample stencil completed HTILE does not prove its clear value");
