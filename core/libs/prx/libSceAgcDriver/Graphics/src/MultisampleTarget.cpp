@@ -900,16 +900,7 @@ void retireUnmapped(std::uintptr_t address, std::size_t bytes) {
 }
 
 void guard(const Context& context, const ColorTarget& target, const std::shared_ptr<std::atomic<bool>>& active, const std::shared_ptr<std::atomic<bool>>& metadataValid, const std::shared_ptr<std::atomic<bool>>& hostOnly) {
-    auto bytes = std::max<std::uint64_t>(target.bytes * target.samples, static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.elementBytes * target.samples);
-    if (MultisampledBlockLog2(target.tileMode) == 16u && target.tileMode != ColorTileMode::Standard64KB && std::has_single_bit(target.elementBytes) && std::has_single_bit(target.samples)) {
-        const auto log2Samples = std::countr_zero(target.samples);
-        const auto log2Pixels = 16u - std::countr_zero(target.elementBytes) - log2Samples;
-        const auto log2Width = (log2Pixels + ((log2Samples & 1u) == 0u ? 1u : 0u)) / 2u;
-        const auto blockWidth = 1u << log2Width;
-        const auto blockHeight = 1u << (log2Pixels - log2Width);
-        const auto align = [](std::uint32_t extent, std::uint32_t block) { return (static_cast<std::uint64_t>(extent) + block - 1u) / block * block; };
-        bytes = align(target.extent.width, blockWidth) * align(target.extent.height, blockHeight) * target.elementBytes * target.samples;
-    }
+    const auto bytes = guardedColorBytes(target);
     std::unique_lock lock(guardedMutex());
     guarded().push_back({context.device, target.address, bytes, target.samples, active, nullptr, hostOnly});
     if (target.dccAddress != 0) {
@@ -1567,6 +1558,32 @@ void RequireNoMultisampleColorTarget(std::uint64_t address, std::size_t bytes, c
     for (const auto& active : retired) active->store(false, std::memory_order_release);
     std::erase_if(guarded(), [&](const auto& range) { return std::find(retired.begin(), retired.end(), range.active) != retired.end(); });
     anyGuarded().store(!guarded().empty(), std::memory_order_release);
+}
+
+std::optional<MultisampleColorAlias> MultisampleColorTargetOver(std::uint64_t address, std::size_t bytes) {
+    const auto aliases = MultisampleColorTargetsOver(address, bytes);
+    if (aliases.empty()) return std::nullopt;
+    return aliases.front();
+}
+
+std::vector<MultisampleColorAlias> MultisampleColorTargetsOver(std::uint64_t address, std::size_t bytes) {
+    std::vector<MultisampleColorAlias> aliases;
+    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return aliases;
+    std::lock_guard lock(targetsMutex());
+    std::shared_lock guardLock(guardedMutex());
+    for (const auto& range : guarded()) {
+        if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+        if (std::any_of(aliases.begin(), aliases.end(), [&](const MultisampleColorAlias& alias) { return alias.active == range.active; })) continue;
+        const auto target = std::find_if(targets().begin(), targets().end(), [&](const auto& candidate) { return candidate->active == range.active; });
+        if (target != targets().end()) {
+            aliases.push_back((*target)->Alias());
+            continue;
+        }
+        MultisampleColorAlias alias{range.address, range.bytes, VK_FORMAT_UNDEFINED, range.samples};
+        alias.active = range.active;
+        aliases.push_back(alias);
+    }
+    return aliases;
 }
 
 std::optional<MultisampleColorAlias> MultisampleColorTargetOver(std::uint64_t address, std::size_t bytes) {

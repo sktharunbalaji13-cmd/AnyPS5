@@ -122,7 +122,8 @@ bool sameDepthAlias(const MultisampleColorAlias& recorded, const GuestMemory::Un
     const auto aliases = MultisampleColorTargetsOver(plane.address, plane.bytes);
     if (aliases.size() != 1u) return false;
     const auto& current = aliases.front();
-    return current.active == recorded.active;
+    const auto sameValue = recorded.value.has_value() == current.value.has_value() && (!recorded.value || std::memcmp(&*recorded.value, &*current.value, sizeof(VkClearColorValue)) == 0);
+    return current.active == recorded.active && current.contents == recorded.contents && current.newest == recorded.newest && sameValue;
 }
 
 std::optional<std::uint8_t> aliasedStencil(const MultisampleColorAlias& alias, const GuestMemory::UnchangedQuery& plane, std::uint32_t samples) {
@@ -494,29 +495,21 @@ public:
         }
         if (clearGeneration != 0u) {
             const auto& metadata = sampling.initial[1];
-            const bool gpuFill = clearPattern.has_value() && (queuedFill || newestHtileNote == 0u);
-            if (clearPattern.has_value()) {
-                std::fprintf(stderr, "[gpu] CheckCurrent: clearPattern=0x%08x clearDepth=%f depthOnly=%d\n", *clearPattern, clearDepth, target.htileDepthOnly);
-            }
+            const bool gpuFill = clearPattern.has_value() && clearFillNote != 0u && (queuedFill || newestHtileNote == 0u);
             for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
                 const auto& plane = sampling.initial[index];
                 if (index == 0u && sampling.depthAlias && sameDepthAlias(*sampling.depthAlias, plane)) continue;
                 if (index != 1u) Require(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes over native multisample depth are not implemented");
             }
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
-            const bool storedAll = GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration);
-            std::fprintf(stderr, "[gpu] CheckCurrent HTILE clear: clearGen=%llu clearPattern=%d clearFillNote=%u queuedFill=%d newestHtileNote=%u queued=%d pending=%d storedAll=%d gpuFill=%d metaAddr=0x%llx metaBytes=0x%zx\n",
-                static_cast<unsigned long long>(clearGeneration), clearPattern.has_value(), clearFillNote, queuedFill, newestHtileNote, clearCompletionQueued, clearPending, storedAll, gpuFill, static_cast<unsigned long long>(metadata.address), metadata.bytes);
-            Require(gpuFill || storedAll, "native multisample depth clear has no complete tracked HTILE store");
+            Require(gpuFill || GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
             auto current = sampling.initial;
             current[1].generation = GuestMemory::CollectWritesUncached(metadata.address, metadata.bytes);
             std::vector<std::uint32_t> words(queuedFill ? 1u : metadata.bytes / sizeof(std::uint32_t), queuedFill ? *clearPattern : 0u);
             if (!queuedFill) {
                 std::memcpy(words.data(), reinterpret_cast<const void*>(metadata.address), metadata.bytes);
-                std::fprintf(stderr, "[gpu] CheckCurrent: read %zu words from 0x%llx, first=0x%08x provesClear=%d\n",
-                    words.size(), static_cast<unsigned long long>(metadata.address), words.empty() ? 0 : words[0],
-                    words.empty() ? 0 : htileProvesClear(words[0], target.htileDepthOnly, clearDepth));
+                Require(target.htilePipeAligned ? HtileProvesClear(words, clearPatternWord) : HtileDepthOnlyProvesClear(words, clearPatternWord), "native multisample depth clear does not prove clear");
             }
             for (const auto word : words) {
                 Require(htileProvesClear(word, target.htileDepthOnly, clearDepth), "native multisample depth completed HTILE does not prove its clear value");
@@ -525,7 +518,11 @@ public:
             for (std::size_t index = 0u; index < current.size(); ++index) {
                 current[index].generation = GuestMemory::CollectWritesUncached(current[index].address, current[index].bytes);
                 if (index == 0u && sampling.depthAlias && sameDepthAlias(*sampling.depthAlias, current[index])) continue;
-                Require(GuestMemory::UnchangedSince(current[index].address, current[index].bytes, current[index].generation), "guest writes raced native multisample depth clear");
+            }
+            for (std::size_t index = 0u; index < current.size(); ++index) {
+                const auto& plane = current[index];
+                if (index == 0u && sampling.depthAlias && sameDepthAlias(*sampling.depthAlias, plane)) continue;
+                Require(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes raced native multisample depth clear");
             }
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
             RecordClear(clearAspects);
