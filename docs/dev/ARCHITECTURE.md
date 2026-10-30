@@ -83,6 +83,17 @@ On Windows, a relinked game run with `APS5_MIMALLOC` set (to any value) allocate
   - After the redirection these calls would enter mimalloc again, before the calling thread's mimalloc state exists.
   - Linker wraps send them to [`RuntimeHeap.c`](../../core/libs/allocator/RuntimeHeap.c), which allocates from the process heap (`HeapAlloc` on `GetProcessHeap()`). The same code frees these blocks through the same wraps.
 
+## macOS allocator
+
+On macOS, a relinked game run with `APS5_MIMALLOC` set (to any value) allocates through [mimalloc](../../3rdparty/mimalloc) instead of the system allocator: its libraries, the C and C++ runtime and the system frameworks they call. Without the variable the game keeps the system allocator.
+
+- The build copies `libmimalloc.dylib` beside the libraries ([`core/libs/CMakeLists.txt`](../../core/libs/CMakeLists.txt)). It keeps mimalloc's macOS defaults: it interposes the C allocation functions and `operator new` and `operator delete`, and replaces the default malloc zone. As on Windows, `mi_free` checks the pointers it gets.
+- dyld interposes only for libraries loaded at launch, so mimalloc has to be in `DYLD_INSERT_LIBRARIES` when the process starts. When `APS5_MIMALLOC` is set and mimalloc is not loaded, a constructor in libkernel ([`MimallocMacOs.cpp`](../../core/libs/prx/libkernel/System/src/MimallocMacOs.cpp)) puts the `libmimalloc.dylib` beside libkernel first in `DYLD_INSERT_LIBRARIES`, sets `APS5_MIMALLOC_RESTARTED` and runs the same executable again with `execv`, with the same arguments and the same process ID. The restarted process removes `APS5_MIMALLOC_RESTARTED` from its environment.
+  - Without `libmimalloc.dylib` beside libkernel the title does not restart and keeps the system allocator.
+  - When dyld ignores `DYLD_INSERT_LIBRARIES`, as for an executable with the hardened runtime, the restarted process prints one line and keeps the system allocator instead of restarting again.
+  - `DYLD_INSERT_LIBRARIES` stays set, so a process the title starts also allocates through mimalloc.
+- mimalloc asks for its arenas at addresses from 2 TiB up, above the guest arena's range; the few blocks it maps without that hint come from the system like any other host mapping. Guest code allocates through libc's guest heap, as on Windows.
+
 ## Thread cancellation
 
 [`Thread.cpp`](../../core/libs/prx/libkernel/Pthread/src/Thread.cpp) records cancellation requests on the target guest thread. New threads start with cancellation enabled and deferred. A disabled request stays pending; enabling deferred cancellation returns before the next cancellation point acts on it. Repeated requests do not add cleanup invocations.
@@ -166,6 +177,8 @@ flowchart LR
 - **Statistics.** A `[log]` line every 10 s in which lines were logged reports lines, bytes, the time spent by the callers and by the logger, and the queue peak; `APS5_LOG_STATS=0` hides it. Identical `deferred write-back failed` notes print three times per 10 s and are then counted in one `repeated N more times` line.
 
 `agc_async_log` checks the order of deferred and written lines, long lines, the repeat limit, a `Flush` that waits for a held stream, a bounded flush that gives up, and a full queue that blocks its caller. `agc_async_log_fatal` starts the test executable as a child that queues lines behind a held stream and then calls `abort()`, calls `std::terminate()`, raises an access violation (Windows) or `SIGABRT` (elsewhere), or aborts without ever releasing the stream; the first four must leave every line in the file in order, the last must still end after the bound.
+
+`ANYPS5_LOG_FILE=<path>` (libc, [`LogFile.cpp`](../../core/libs/prx/libc/src/LogFile.cpp)) adds a copy of the runtime log that does not go through `WriteLogLine` or the sink. At load, libc keeps the real standard output and error, diverts descriptors 1 and 2 (the standard handles on Windows) into two pipes and starts one thread per pipe. Each thread writes what it reads to the kept stream at once and each whole line to the file under one lock, so a line of one stream never lands inside a line of the other. A line without a newline stays in a bounded carry (1 MiB) and is written to the file when it ends, when the carry is full or when the process ends. The crash and abort reporters do not use the pipes: `log_file::CrashWrite` takes the lock for at most 250 ms, moves what is still in the pipes into the file and writes the report to the kept stderr and the file directly. `LibcRunEndFlush_nid_no_patch` and an `atexit` handler drain at the end; `LogFileRelease_nid_no_patch` puts the real streams back before `sceSystemServiceLoadExec` replaces the process. Unset or empty, nothing is created.
 
 ### Runtime image and sampler tables
 
