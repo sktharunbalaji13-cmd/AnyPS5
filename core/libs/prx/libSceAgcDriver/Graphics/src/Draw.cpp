@@ -2860,6 +2860,15 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
             });
         }
         if (binding.resident != nullptr) {
+            StorageTexture::RetainPresentable(binding.resident);
+            if (color.address == 0x1504910000 || color.address == 0x1506940000) {
+                std::fprintf(stderr, "[prepare-target 0x%llx] %ux%u fmt=%u idxCount=%u instCount=%u indexed=%d shaders=%zu\n",
+                             static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height,
+                             static_cast<unsigned>(color.format), draw.indexCount, draw.instanceCount, draw.indexed, shaders.size());
+                for (const auto& s : shaders) {
+                    std::fprintf(stderr, "   [shader stage %d]\n", static_cast<int>(s.stage));
+                }
+            }
             timer.phase(PhaseReadTarget);
             binding.proxied = AttachmentProxyFormat(context, color.format) != VK_FORMAT_UNDEFINED;
             targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice, color.layers, color.arraySlice));

@@ -2104,6 +2104,16 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
         }
     }
     if (!written.empty()) publishWrittenDepth(written);
+}
+
+void RetireResidentDepth_nid_no_patch(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0u || !anyDepthGuard().load(std::memory_order_acquire)) return;
+    Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "native depth release range overflows");
+    const auto overlaps = [&](const DepthGuard& range) { return address < range.address + range.bytes && range.address < address + bytes; };
+    {
+        std::shared_lock lock(depthGuardMutex());
+        if (std::ranges::none_of(depthGuards(), overlaps)) return;
+    }
     std::unique_lock lock(depthGuardMutex());
     for (const auto& range : depthGuards()) {
         if (overlaps(range)) range.active->store(false, std::memory_order_release);
