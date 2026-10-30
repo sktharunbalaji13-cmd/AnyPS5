@@ -2878,6 +2878,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
             });
         }
         if (binding.resident != nullptr) {
+            StorageTexture::RetainPresentable(binding.resident);
             if (color.address == 0x1504910000 || color.address == 0x1506940000) {
                 std::fprintf(stderr, "[prepare-target 0x%llx] %ux%u fmt=%u idxCount=%u instCount=%u indexed=%d shaders=%zu\n",
                              static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height,

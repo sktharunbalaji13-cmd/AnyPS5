@@ -601,7 +601,12 @@ void Driver::enqueue(Submission submission) {
             ReportFailure(std::current_exception());
             return;
         }
-        run(queue);
+        try {
+            run(queue);
+        } catch (const ProcessShutdown&) {
+        } catch (...) {
+            ReportFailure(std::current_exception());
+        }
     });
 }
 

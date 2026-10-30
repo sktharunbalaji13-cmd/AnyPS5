@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/HostHdr.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/HalfFloatScanout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -143,6 +144,9 @@ std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     const auto size = buffer.tilingMode == 1 ? static_cast<std::uint64_t>(pitch) * buffer.height * texelBytes
         : static_cast<std::uint64_t>((buffer.width + 127u) / 128u) * ((buffer.height + blockHeight - 1u) / blockHeight) * 65536u;
     require(size <= std::numeric_limits<std::size_t>::max() && size <= std::numeric_limits<std::uintptr_t>::max() - buffer.address, "VideoOut: display buffer range overflow");
+    // Remember the scanout surface: a raster target drawn into it stays findable by the presenter
+    // even when the storage cache's budget evicted the image before the flip ran.
+    Graphics::StorageTexture::NoteDisplayRange(buffer.address, static_cast<std::uint64_t>(size));
     return static_cast<std::size_t>(size);
 }
 

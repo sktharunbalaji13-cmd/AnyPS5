@@ -3321,18 +3321,31 @@ ResidentPresent ResidentPresentable(const Graphics::Context& context, const Grap
 }
 
 std::shared_ptr<Graphics::StorageTexture> PresentableResident(const Graphics::Context& context, const DisplayBuffer& buffer, VkFilter& filter, bool& pending, bool& convert, std::uint32_t& layer) {
-    auto resident = Graphics::StorageTexture::FindPendingSlice(buffer.address, DisplayBufferSize(buffer));
-    pending = resident != nullptr;
+    const auto bytes = DisplayBufferSize(buffer);
+    auto pendingResident = Graphics::StorageTexture::FindPendingSlice(buffer.address, bytes);
+    std::array<std::shared_ptr<Graphics::StorageTexture>, 3> candidates{
+        pendingResident,
+        Graphics::StorageTexture::FindPresentable(buffer.address, bytes),
+        Graphics::StorageTexture::FindLive(buffer.address, bytes)};
+    pending = false;
     convert = false;
     layer = 0;
-    if (resident == nullptr) {
-        resident = Graphics::StorageTexture::FindLive(buffer.address, DisplayBufferSize(buffer));
-        if (resident == nullptr) return nullptr;
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        const auto& candidate = candidates[index];
+        if (candidate == nullptr) continue;
+        if (std::any_of(candidates.begin(), candidates.begin() + index, [&](const auto& earlier) { return earlier == candidate; })) continue;
+        const auto path = ResidentPresentable(context, *candidate, buffer, filter, layer);
+        if (path == ResidentPresent::None) continue;
+        pending = index == 0;
+        if (index == 1) {
+            static std::atomic<int> reported{0};
+            const auto count = reported.fetch_add(1) + 1;
+            if (count <= 8) std::fprintf(stderr, "[present] raster target 0x%llx served from the presentable registry (%llu MiB)\n", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(candidate->GuestBytes() >> 20u));
+        }
+        convert = path == ResidentPresent::Convert;
+        return candidate;
     }
-    const auto path = ResidentPresentable(context, *resident, buffer, filter, layer);
-    if (path == ResidentPresent::None) resident.reset();
-    convert = path == ResidentPresent::Convert;
-    return resident;
+    return nullptr;
 }
 
 Graphics::DccKeys ResidentKeys(const Graphics::StorageTexture& resident) {

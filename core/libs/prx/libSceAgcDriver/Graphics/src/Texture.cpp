@@ -5575,6 +5575,85 @@ std::shared_ptr<StorageTexture> StorageTexture::FindLive(std::uint64_t address, 
     return nullptr;
 }
 
+namespace {
+
+// Scanout addresses are few and long-lived; raster targets into them are retained newest-first and
+// bounded so a stale buffer's image cannot pin memory once the title moves on to another surface.
+constexpr std::size_t MaxDisplayRanges = 16;
+constexpr std::size_t MaxPresentableTextures = 6;
+
+struct PresentableRegistry {
+    AgcDriver::Mutex mutex;
+    std::atomic<bool> anyDisplay{false};
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> displayRanges;
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<StorageTexture>>> textures;
+};
+
+PresentableRegistry& Presentables() {
+    static PresentableRegistry registry;
+    return registry;
+}
+
+bool DisplayRangeCovers(const PresentableRegistry& registry, std::uint64_t address, std::uint64_t bytes) {
+    return std::any_of(registry.displayRanges.begin(), registry.displayRanges.end(), [&](const auto& range) {
+        return range.first == address && (bytes == 0 || range.second >= bytes);
+    });
+}
+
+} // namespace
+
+void StorageTexture::NoteDisplayRange(std::uint64_t address, std::uint64_t bytes) {
+    if (address == 0 || bytes == 0) return;
+    auto& registry = Presentables();
+    std::lock_guard lock(registry.mutex);
+    registry.anyDisplay.store(true, std::memory_order_release);
+    auto it = std::find_if(registry.displayRanges.begin(), registry.displayRanges.end(), [&](const auto& range) { return range.first == address; });
+    if (it != registry.displayRanges.end()) {
+        it->second = std::max(it->second, bytes);
+        std::rotate(registry.displayRanges.begin(), it, std::next(it));
+        return;
+    }
+    registry.displayRanges.insert(registry.displayRanges.begin(), {address, bytes});
+    if (registry.displayRanges.size() > MaxDisplayRanges) registry.displayRanges.pop_back();
+}
+
+void StorageTexture::RetainPresentable(const std::shared_ptr<StorageTexture>& texture) {
+    if (texture == nullptr) return;
+    auto& registry = Presentables();
+    if (!registry.anyDisplay.load(std::memory_order_acquire)) return;
+    std::shared_ptr<StorageTexture> dropped;
+    std::lock_guard lock(registry.mutex);
+    const auto address = texture->descriptor.baseAddress;
+    if (!DisplayRangeCovers(registry, address, texture->guestBytes)) return;
+    auto it = std::find_if(registry.textures.begin(), registry.textures.end(), [&](const auto& entry) { return entry.first == address; });
+    if (it != registry.textures.end()) {
+        if (it->second != texture) dropped = std::exchange(it->second, texture);
+        std::rotate(registry.textures.begin(), it, std::next(it));
+        return;
+    }
+    registry.textures.insert(registry.textures.begin(), {address, texture});
+    if (registry.textures.size() > MaxPresentableTextures) {
+        dropped = std::move(registry.textures.back().second);
+        registry.textures.pop_back();
+    }
+}
+
+std::shared_ptr<StorageTexture> StorageTexture::FindPresentable(std::uint64_t address, std::uint64_t bytes) {
+    auto& registry = Presentables();
+    if (!registry.anyDisplay.load(std::memory_order_acquire)) return nullptr;
+    std::lock_guard lock(registry.mutex);
+    auto it = std::find_if(registry.textures.begin(), registry.textures.end(), [&](const auto& entry) {
+        // The address alone identifies the surface; ResidentPresentable validates the extent,
+        // format and slice geometry, so a differently shaped image at the same address is refused
+        // there rather than hiding the real target.
+        return entry.first == address && entry.second != nullptr;
+    });
+    if (it == registry.textures.end()) return nullptr;
+    auto texture = it->second;
+    std::rotate(registry.textures.begin(), it, std::next(it));
+    return texture;
+}
+
 bool StorageTexture::SameSurfaceShape(const StorageTexture& other) const {
     const auto& mine = descriptor;
     const auto& theirs = other.descriptor;

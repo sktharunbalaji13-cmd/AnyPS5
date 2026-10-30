@@ -342,6 +342,17 @@ public:
     // The cached, live image whose surface is exactly [address, address + bytes), if any (the newest
     // of several: see ClassifyFill).
     static std::shared_ptr<StorageTexture> FindLive(std::uint64_t address, std::uint64_t bytes);
+    // Scanout surfaces (DisplayBufferSize notes each one) are often rendered into a resident image
+    // that the storage cache must evict again soon after: two 4K colour buffers already exceed a
+    // small forced cache budget, and the presenter can run ahead of the queue that draws the next
+    // frame. A raster target drawn into a noted scanout surface is retained here (bounded, newest
+    // per address) so PresentableResident still finds the image holding that surface's results
+    // after the cache let the entry go. The retained image is never flushed by this registry; a
+    // replacement simply drops the previous reference (the cache's eviction, if any, already
+    // stored its pending units).
+    static void NoteDisplayRange(std::uint64_t address, std::uint64_t bytes);
+    static void RetainPresentable(const std::shared_ptr<StorageTexture>& texture);
+    static std::shared_ptr<StorageTexture> FindPresentable(std::uint64_t address, std::uint64_t bytes);
     // Whether the two surfaces differ in nothing but their address (and DCC metadata).
     bool SameSurfaceShape(const StorageTexture& other) const;
     bool ImageCoversGuestBytes() const;
