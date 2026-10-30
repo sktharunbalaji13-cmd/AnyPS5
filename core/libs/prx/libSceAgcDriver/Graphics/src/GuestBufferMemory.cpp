@@ -2599,6 +2599,8 @@ std::uint64_t blockBytes(const GuestRuns& runs) {
 }
 
 void reserveHeapBytes(std::uint64_t address, std::uint64_t bytes, std::uint64_t need) {
+    Spaces().current.store(nullptr);
+    sweepMirrors();
     auto& state = Mirrors();
     for (int attempt = 0;; ++attempt) {
         {
@@ -3283,7 +3285,7 @@ void sweepMirrors() {
     bool pinned = space != nullptr;
     std::size_t leased = 0;
     for (auto it = state.entries.begin(); it != state.entries.end();) {
-        if (!it->second->range.expired()) {
+        if (!it->second->range.expired() && (!it->second->resident || it->second->resident.use_count() > 1)) {
             if (pinned) {
                 while (leased < space->lease.size() && space->lease[leased]->address < it->first) ++leased;
                 pinned = leased < space->lease.size() && sameRange(it->second->range, space->lease[leased]);
