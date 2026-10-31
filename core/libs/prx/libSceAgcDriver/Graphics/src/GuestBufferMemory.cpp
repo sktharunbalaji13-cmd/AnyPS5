@@ -3207,7 +3207,12 @@ std::shared_ptr<ImageMirror> acquireMirror(const Context& context, const std::sh
         mirror->watchedSerial.store(serial, std::memory_order_relaxed);
         if (context.sparseBinding && context.sparseResidencyBuffer && context.sparseResidencyAliased) backed = GuestNonzeroBlocks(sparse ? clipPieces(pieces, mirror->base, mirror->base + mirror->bytes) : GuestRuns{{mirror->base, mirror->base + mirror->bytes}});
         auto need = blockBytes(backed);
-        reserveHeapBytes(selected.address, selected.bytes, need);
+        try {
+            reserveHeapBytes(selected.address, selected.bytes, need);
+        } catch (const std::runtime_error& error) {
+            std::fprintf(stderr, "[gpu] %s; falling back to copies\n", error.what());
+            return nullptr;
+        }
         try {
             mirror->resident = ResidentBuffer::Create(context, mirror->base, mirror->bytes, backed);
         } catch (const std::runtime_error& error) {
@@ -3225,7 +3230,12 @@ std::shared_ptr<ImageMirror> acquireMirror(const Context& context, const std::sh
                 state.heapBytes -= need;
             }
             need = mirror->bytes;
-            reserveHeapBytes(selected.address, selected.bytes, need);
+            try {
+                reserveHeapBytes(selected.address, selected.bytes, need);
+            } catch (const std::runtime_error& error) {
+                std::fprintf(stderr, "[gpu] %s; falling back to copies\n", error.what());
+                return nullptr;
+            }
         }
         mirror->accounted = need;
     }
