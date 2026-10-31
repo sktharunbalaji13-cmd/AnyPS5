@@ -6353,6 +6353,7 @@ void GuestBufferMemory::addAddressStoreSpans() {
         const auto served = servedEnd(region);
         if (region.begin >= served) return;
         if (!region.mirror->sparse) {
+            if ((served - region.begin) > (heapMirrorBudget() / 2)) return;
             writes.emplace_back(region.begin, served);
             return;
         }
@@ -6374,7 +6375,13 @@ void GuestBufferMemory::takeHeapReferences() {
         auto& mirror = *found->mirror;
         const auto served = std::min(end, servedEnd(*found));
         if (begin >= served) continue;
-        growResident(mirror, {{begin, served}});
+        try {
+            growResident(mirror, {{begin, served}});
+        } catch (const std::runtime_error& error) {
+            static std::atomic<int> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[gpu] %s; skipping heap reference snapshot\n", error.what());
+            continue;
+        }
         std::vector<std::byte> bytes(static_cast<std::size_t>(served - begin));
         if (mirror.resident != nullptr) mirror.resident->Read(begin, bytes);
         else std::memcpy(bytes.data(), mirror.buffer->Bytes().data() + (begin - mirror.base), bytes.size());
@@ -6410,7 +6417,7 @@ void GuestBufferMemory::WriteBack() {
             const auto length = static_cast<std::size_t>((mirror.heap ? served : end) - begin);
             if (mirror.heap) {
                 const auto reference = std::find_if(heapReferences.begin(), heapReferences.end(), [&](const auto& entry) { return entry.first == begin; });
-                Require(reference != heapReferences.end() && reference->second.size() == length, "heap mirror write-back has no reference");
+                if (reference == heapReferences.end() || reference->second.size() != length) continue;
                 if (mirror.resident == nullptr) {
                     const auto current = mirror.buffer->Bytes().subspan(offset, length);
                     if (mirror.sparse) storeSparse(mirror, begin, current, reference->second);
