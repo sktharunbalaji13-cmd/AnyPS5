@@ -1,5 +1,7 @@
 #ifdef _WIN32
 
+#define PSAPI_VERSION 2
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +11,7 @@
 #include <malloc.h>
 #include <new>
 #include <windows.h>
+#include <psapi.h>
 
 namespace {
 
@@ -167,22 +170,55 @@ void* TryAllocate(std::size_t bytes) noexcept {
     return std::malloc(bytes);
 }
 
+std::atomic<std::uint64_t> hostedBytes{0};
+std::atomic<int> exhaustionReports{0};
+
+void* Allocate(std::size_t bytes);
+
+void ReportExhaustion(std::size_t bytes) noexcept {
+    if (exhaustionReports.exchange(1, std::memory_order_relaxed) != 0) return;
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    const bool counted = K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters)) != 0;
+    PERFORMANCE_INFORMATION system{};
+    system.cb = sizeof(system);
+    const bool measured = K32GetPerformanceInfo(&system, sizeof(system)) != 0;
+    std::fprintf(stderr, "[alloc] HostAllocator::Allocate failed for %zu bytes (0x%zx): allocations over %zu bytes hold %llu MiB; process private %llu MiB, working set %llu MiB, peak private %llu MiB; system commit %llu of %llu MiB, physical %llu MiB with %llu MiB available\n",
+        bytes, bytes, LargestCached, static_cast<unsigned long long>(hostedBytes.load(std::memory_order_relaxed) >> 20u),
+        counted ? static_cast<unsigned long long>(counters.PrivateUsage >> 20u) : 0ull,
+        counted ? static_cast<unsigned long long>(counters.WorkingSetSize >> 20u) : 0ull,
+        counted ? static_cast<unsigned long long>(counters.PeakPagefileUsage >> 20u) : 0ull,
+        measured ? static_cast<unsigned long long>(system.CommitTotal * system.PageSize >> 20u) : 0ull,
+        measured ? static_cast<unsigned long long>(system.CommitLimit * system.PageSize >> 20u) : 0ull,
+        measured ? static_cast<unsigned long long>(system.PhysicalTotal * system.PageSize >> 20u) : 0ull,
+        measured ? static_cast<unsigned long long>(system.PhysicalAvailable * system.PageSize >> 20u) : 0ull);
+    void* frames[32]{};
+    const auto depth = static_cast<std::size_t>(RtlCaptureStackBackTrace(2, 32, frames, nullptr));
+    std::fprintf(stderr, "[alloc] caller chain from operator new at %p, called from %p:", reinterpret_cast<void*>(&Allocate), __builtin_return_address(1));
+    for (std::size_t index = 0; index < depth; ++index) std::fprintf(stderr, " %p", frames[index]);
+    std::fprintf(stderr, "\n");
+}
+
 void* Allocate(std::size_t bytes) {
     for (;;) {
-        if (void* block = TryAllocate(bytes)) return block;
+        if (void* block = TryAllocate(bytes)) {
+            if (bytes > LargestCached) hostedBytes.fetch_add(bytes, std::memory_order_relaxed);
+            return block;
+        }
         const auto handler = std::get_new_handler();
         if (handler == nullptr) {
-            std::fprintf(stderr, "[alloc] HostAllocator::Allocate failed for %zu bytes (0x%zx)\n", bytes, bytes);
+            ReportExhaustion(bytes);
             throw std::bad_alloc();
         }
+        ReportExhaustion(bytes);
         handler();
     }
 }
 
 void Release(void* block, std::size_t bytes = 0) noexcept {
     if (block == nullptr) return;
+    const auto usable = bytes != 0 && bytes % Granule == 0 ? bytes : _msize(block);
     if (auto* cache = CurrentCache()) {
-        const auto usable = bytes != 0 && bytes % Granule == 0 ? bytes : _msize(block);
         if (usable >= Granule && usable < LargestCached + Granule) {
             const auto sizeClass = usable / Granule - 1;
             if (cache->counts[sizeClass] == Depth(sizeClass) && KeepList(sizeClass, cache->heads[sizeClass])) {
@@ -197,6 +233,7 @@ void Release(void* block, std::size_t bytes = 0) noexcept {
             }
         }
     }
+    if (usable > LargestCached) hostedBytes.fetch_sub(usable, std::memory_order_relaxed);
     std::free(block);
 }
 
