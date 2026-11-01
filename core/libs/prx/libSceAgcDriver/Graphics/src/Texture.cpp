@@ -2288,6 +2288,13 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         keys = handOverKeys.has_value() ? *handOverKeys : ProvedKeys();
         if (profile && descriptor.dccAddress != 0) LookupOutcomes::Add(LookupOutcomes::DccScan, keysStart);
         if (keys != uploadedKeys) {
+            static const bool keepOnExternalClear = std::getenv("APS5_KEEP_IMAGE_ON_EXTERNAL_CLEAR_KEYS") != nullptr;
+            if (keepOnExternalClear && uploadedKeys == DccKeys::Uncompressed && IsDccClear(keys)) {
+                uploadedKeys = keys;
+                ++Profile().storageReused;
+                refreshGeneration();
+                return true;
+            }
             changed.assign(trackedLayers, true);
             unchanged = false;
             keysChanged = true;
