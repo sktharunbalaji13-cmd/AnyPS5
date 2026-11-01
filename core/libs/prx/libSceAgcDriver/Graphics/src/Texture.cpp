@@ -2410,6 +2410,8 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
     // clear code make every result dead on hardware too. Without a generation (no tracking) a
     // unit's stamps say nothing, so it is stored.
     const auto droppable = [&](std::uint32_t unit) {
+        static const bool keepPending = std::getenv("APS5_KEEP_PENDING_RESULTS") != nullptr;
+        if (keepPending) return false;
         if (keysChanged && IsDccClear(keys) && (!IsDccClear(filledKeys) || filledKeys != keys || !HasWritesSinceFill(unit))) return true;
         if (!blockUnits) return false;
         if (compared) return stampedBlocks.at(unit) == GuestMemory::BlockWritten;
