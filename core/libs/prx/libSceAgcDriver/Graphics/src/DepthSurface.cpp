@@ -438,6 +438,49 @@ public:
                         const auto bytes = (elements * elementBytes + 3u) & ~std::uint64_t{3};
                         context.detiler->DispatchMultisampleImage(upload, elementBytes, source.Handle(), offset, bytes, uploadView, target.extent.width, target.extent.height, 1u, target.samples, static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(elements));
                     }
+                    if (target.stencilAddress != 0u) {
+                        try {
+                            VkFormatProperties stencilProperties{};
+                            context.formatProperties(context.physical, VK_FORMAT_R8_UINT, &stencilProperties);
+                            VkImageFormatProperties stencilSampleProperties{};
+                            const auto stencilResult = context.imageFormatProperties(context.physical, VK_FORMAT_R8_UINT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_STORAGE_BIT, 0, &stencilSampleProperties);
+                            if ((stencilProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0 || stencilResult != VK_SUCCESS || (stencilSampleProperties.sampleCounts & static_cast<VkSampleCountFlagBits>(target.samples)) == 0) throw std::runtime_error("the stencil plane needs an R8 storage image at the target sample count");
+                            const MultisampleTextureLayout stencilLayout(TextureTileMode::kZ64KBX, 1u, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+                            const auto stencilBytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(target.extent, 1u, target.samples));
+                            Require(stencilLayout.Bytes() == stencilBytes, "native multisample stencil import layout differs from its plane");
+                            std::vector<std::byte> stencilPlane(stencilBytes);
+                            GuestMemory::CheckRange(reinterpret_cast<const void*>(target.stencilAddress), stencilPlane.size(), 1u);
+                            GuestMemory::CopyGuestBytes(stencilPlane.data(), reinterpret_cast<const void*>(target.stencilAddress), stencilPlane.size());
+                            std::vector<std::byte> stencilLinear(static_cast<std::size_t>(stencilLayout.LinearBytes()));
+                            stencilLayout.Detile(stencilPlane, stencilLinear);
+                            const auto stencilPadded = (stencilLinear.size() + 3u) & ~std::size_t{3};
+                            Buffer stencilSource(context, stencilPadded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                            std::memcpy(stencilSource.Bytes().data(), stencilLinear.data(), stencilLinear.size());
+                            if (stencilPadded > stencilLinear.size()) std::memset(stencilSource.Bytes().data() + stencilLinear.size(), 0, stencilPadded - stencilLinear.size());
+                            VkImageView stencilView = VK_NULL_HANDLE;
+                            VkImageViewCreateInfo stencilInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                            stencilInfo.image = image;
+                            stencilInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+                            stencilInfo.format = VK_FORMAT_R8_UINT;
+                            stencilInfo.subresourceRange = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
+                            VkImageViewUsageCreateInfo stencilUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+                            stencilUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+                            stencilInfo.pNext = &stencilUsage;
+                            Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &stencilInfo, nullptr, &stencilView), "vkCreateImageView stencil import");
+                            RecordMemoryBarrier(context, upload, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                            const std::uint64_t stencilElements = static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.samples;
+                            for (std::uint64_t offset = 0u; offset < stencilPadded; offset += chunk) {
+                                if (offset >= stencilElements) break;
+                                const auto elements = std::min<std::uint64_t>(stencilElements - offset, chunk);
+                                const auto bytes = (elements + 3u) & ~std::uint64_t{3};
+                                context.detiler->DispatchMultisampleImage(upload, 1u, stencilSource.Handle(), offset, bytes, stencilView, target.extent.width, target.extent.height, 1u, target.samples, static_cast<std::uint32_t>(offset), static_cast<std::uint32_t>(elements));
+                            }
+                            context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, stencilView, nullptr);
+                        } catch (const std::exception& error) {
+                            static std::atomic<int> reportedStencil{0};
+                            if (reportedStencil.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[depth] stencil plane import skipped: %s\n", error.what());
+                        }
+                    }
                     RecordMemoryBarrier(context, upload, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
                     if (importBatch) importBatch->SubmitAndWait();
                     else batch->SubmitAndWait();
