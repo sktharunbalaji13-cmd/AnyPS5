@@ -2354,7 +2354,8 @@ void VulkanDevice::startJournalReplay() {
 VulkanDevice::~VulkanDevice() = default;
 
 VkPipelineCreateFlags VulkanDevice::computePipelineFlags() const {
-    return (graphicsContext().pipelineExecutableInfo ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0) | VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
+    static const bool noOptimize = std::getenv("APS5_NO_COMPUTE_OPTIMIZE") != nullptr;
+    return (graphicsContext().pipelineExecutableInfo ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0) | VK_PIPELINE_CREATE_DISPATCH_BASE_BIT | (noOptimize ? VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT : 0);
 }
 
 std::uint32_t VulkanDevice::computeSubgroupSize(const ShaderRecompiler::RecompileResult& shader) const {
