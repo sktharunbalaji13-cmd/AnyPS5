@@ -151,7 +151,7 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     for (const auto word : metadata) {
         if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) {
             static thread_local char text[128];
-            std::snprintf(text, sizeof(text), "native multisample depth initial HTILE word 0x%08x does not prove its clear value", word);
+            std::snprintf(text, sizeof(text), "native multisample depth initial HTILE word 0x%08x does not prove its clear value %.9g", word, target.clearDepth);
             return refuse(text);
         }
     }
@@ -1888,8 +1888,9 @@ void publishWrittenDepth(std::span<const std::shared_ptr<std::atomic<bool>>> wri
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(surfacesMutex());
     for (const auto& flag : written) {
-        const auto found = std::ranges::find_if(surfaces(), [&](const auto& surface) { return surface->hostWritten == flag && surface->active->load(std::memory_order_acquire); });
+        const auto found = std::ranges::find_if(surfaces(), [&](const auto& surface) { return surface->hostWritten == flag; });
         Require(found != surfaces().end(), "the written native multisample depth surface is not resident");
+        if (!(*found)->active->load(std::memory_order_acquire) || (*found)->retired) continue;
         (*found)->PublishToGuest();
     }
 }
