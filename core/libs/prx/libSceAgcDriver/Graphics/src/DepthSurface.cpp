@@ -99,6 +99,7 @@ std::atomic<bool>& anyDepthGuard() {
 struct DepthSamplingState {
     std::array<GuestMemory::UnchangedQuery, 2> initial{};
     std::string refusal;
+    bool importDepth = false;
 
     void Refuse(const char* reason) {
         if (refusal.empty()) refusal = reason;
@@ -106,12 +107,15 @@ struct DepthSamplingState {
 };
 
 bool htileProvesClear(std::uint32_t word, bool depthOnly, float clearDepth) {
-    if (word == 0xfffc000fu || word == 0xfffff00fu) return true;
     if ((word & 15u) == 15u && word != 0xffffffffu) return false;
     const auto depth = depthOnly ? word & 0xfffffff0u : word & 0xfffff00fu;
     if (depth == 0u) return clearDepth == 0.0f;
     if (depth == (depthOnly ? 0xfffffff0u : 0xfffc0000u)) return clearDepth == 1.0f;
     return false;
+}
+
+bool htileUncompressed(std::uint32_t word) {
+    return word == 0xfffc000fu || word == 0xfffff00fu;
 }
 
 DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarget& target) {
@@ -128,7 +132,6 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     if ((target.stencilAddress != 0u && !target.htileDepthOnly) || target.htileStencil) return refuse("native multisample stencil import is not implemented");
     if (target.htileAddress == 0u || (target.htileAddress & 255u) != 0u || (!target.htilePipeAligned && !target.htileDepthOnly)) return refuse("native multisample depth initial import requires pipe-aligned or depth-only HTILE");
     if (target.htileVrsEncoding != 0u && !target.htileDepthOnly) return refuse("native multisample depth initial import requires HTILE without VRS");
-    if (target.clearDepth != 0.0f && target.clearDepth != 1.0f) return refuse("native multisample depth initial clear value is not implemented");
     state.initial = {{{target.address, static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(target.extent, target.format == VK_FORMAT_D16_UNORM ? 2u : 4u, target.samples)), 0u}, {target.htileAddress, static_cast<std::size_t>(HtileMetadataBytes(target.extent)), 0u}}};
     for (const auto& range : state.initial) {
         if (range.address > std::numeric_limits<std::uint64_t>::max() - range.bytes) return refuse("native depth import range overflows");
@@ -148,15 +151,41 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     std::vector<std::uint32_t> metadata(htile.bytes / sizeof(std::uint32_t));
     GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(metadata)), 256u);
     if (!target.htilePipeAligned && std::adjacent_find(metadata.begin(), metadata.end(), [](std::uint32_t first, std::uint32_t second) { return first != second; }) != metadata.end()) return refuse("native multisample depth HTILE that is not pipe-aligned holds more than one word");
+    std::size_t uncompressedWords = 0;
+    std::size_t clearWords = 0;
     for (const auto word : metadata) {
+        if (htileUncompressed(word)) {
+            ++uncompressedWords;
+            continue;
+        }
         if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) {
             static thread_local char text[128];
             std::snprintf(text, sizeof(text), "native multisample depth initial HTILE word 0x%08x does not prove its clear value %.9g", word, target.clearDepth);
             return refuse(text);
         }
+        ++clearWords;
     }
+    if (uncompressedWords != 0u && clearWords != 0u) return refuse("native multisample depth HTILE mixes clear and uncompressed words");
     for (const auto& range : state.initial) GuestMemory::CollectWritesUncached(range.address, range.bytes);
     if (!GuestMemory::UnchangedSinceAll(state.initial)) return refuse("guest writes raced native multisample depth import");
+    if (uncompressedWords != 0u) {
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[depth] uncompressed native multisample depth import format=%d samples=%u depth-only=%d\n", static_cast<int>(target.format), target.samples, target.htileDepthOnly ? 1 : 0);
+        if (target.format != VK_FORMAT_D32_SFLOAT && target.format != VK_FORMAT_D16_UNORM) {
+            state.importDepth = false;
+            return refuse("native multisample depth uncompressed import for a combined format is not implemented");
+        }
+        if (context.detiler == nullptr) return refuse("native multisample depth uncompressed import needs the texture detiler");
+        VkFormatProperties properties{};
+        context.formatProperties(context.physical, target.format, &properties);
+        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+            state.importDepth = false;
+            return refuse("native multisample depth uncompressed import needs a storage-capable depth format");
+        }
+        state.importDepth = true;
+    } else if (target.clearDepth != 0.0f && target.clearDepth != 1.0f) {
+        return refuse("native multisample depth initial clear value is not implemented");
+    }
     return state;
 }
 
@@ -294,6 +323,7 @@ public:
             info.samples = static_cast<VkSampleCountFlagBits>(target.samples);
             info.tiling = VK_IMAGE_TILING_OPTIMAL;
             info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (this->sampling.importDepth) info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
             sampleable = target.samples == 1;
             if (target.samples != 1) {
                 Require(context.imageFormatProperties != nullptr, "native multisample depth requires image format queries");
@@ -345,12 +375,67 @@ public:
             toGeneral.image = image;
             toGeneral.subresourceRange = viewInfo.subresourceRange;
             const auto barrier = context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier");
-            barrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
-            const VkClearDepthStencilValue clear{target.clearDepth, target.clearStencil};
-            context.Function<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &toGeneral.subresourceRange);
-            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            if (batch) batch->SubmitAndWait();
-            else Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
+            if (target.samples != 1u && this->sampling.importDepth) {
+                std::unique_ptr<CommandBatch> importBatch;
+                auto upload = commands;
+                if (recorder != nullptr) {
+                    importBatch = std::make_unique<CommandBatch>(context);
+                    upload = importBatch->Handle();
+                }
+                toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                barrier(upload, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+                const std::uint32_t elementBytes = target.format == VK_FORMAT_D16_UNORM ? 2u : 4u;
+                const MultisampleTextureLayout layout(TextureTileMode::kZ64KBX, elementBytes, target.samples, target.extent.width, target.extent.height, 1u, target.pipeBankXor);
+                const auto planeBytes = this->sampling.initial[0].bytes;
+                Require(layout.Bytes() == planeBytes, "native multisample depth import layout differs from its guarded range");
+                std::vector<std::byte> plane(planeBytes);
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(target.address), plane.size(), 1u);
+                GuestMemory::CopyGuestBytes(plane.data(), reinterpret_cast<const void*>(target.address), plane.size());
+                std::vector<std::byte> linear(static_cast<std::size_t>(layout.LinearBytes()));
+                layout.Detile(plane, linear);
+                const auto paddedBytes = (linear.size() + 3u) & ~std::size_t{3};
+                Buffer source(context, paddedBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                std::memcpy(source.Bytes().data(), linear.data(), linear.size());
+                if (paddedBytes > linear.size()) std::memset(source.Bytes().data() + linear.size(), 0, paddedBytes - linear.size());
+                VkImageView uploadView = VK_NULL_HANDLE;
+                VkImageViewCreateInfo uploadInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+                uploadInfo.image = image;
+                uploadInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+                uploadInfo.format = hostFormat;
+                uploadInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &uploadInfo, nullptr, &uploadView), "vkCreateImageView depth import");
+                try {
+                    RecordMemoryBarrier(context, upload, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                    const std::uint64_t totalElements = static_cast<std::uint64_t>(target.extent.width) * target.extent.height * target.samples;
+                    const auto alignment = std::max<std::uint64_t>(4u, context.limits.minStorageBufferOffsetAlignment);
+                    const auto limit = static_cast<std::uint64_t>(context.limits.maxStorageBufferRange);
+                    auto chunk = std::min<std::uint64_t>(paddedBytes, std::max<std::uint64_t>(alignment, 8ull << 20u));
+                    chunk -= chunk % alignment;
+                    chunk = std::min(chunk, limit - limit % alignment);
+                    Require(chunk != 0u, "native multisample depth import chunk exceeds the storage buffer range");
+                    for (std::uint64_t offset = 0u; offset < paddedBytes; offset += chunk) {
+                        const auto first = offset / elementBytes;
+                        if (first >= totalElements) break;
+                        const auto elements = std::min<std::uint64_t>(totalElements - first, chunk / elementBytes);
+                        const auto bytes = (elements * elementBytes + 3u) & ~std::uint64_t{3};
+                        context.detiler->DispatchMultisampleImage(upload, elementBytes, source.Handle(), offset, bytes, uploadView, target.extent.width, target.extent.height, 1u, target.samples, static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(elements));
+                    }
+                    RecordMemoryBarrier(context, upload, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                    if (importBatch) importBatch->SubmitAndWait();
+                    else batch->SubmitAndWait();
+                } catch (...) {
+                    context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, uploadView, nullptr);
+                    throw;
+                }
+                context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, uploadView, nullptr);
+            } else {
+                barrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+                const VkClearDepthStencilValue clear{target.clearDepth, target.clearStencil};
+                context.Function<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &toGeneral.subresourceRange);
+                RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                if (batch) batch->SubmitAndWait();
+                else Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
+            }
         } catch (...) {
             release();
             throw;
