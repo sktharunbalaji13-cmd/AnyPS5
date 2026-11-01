@@ -508,7 +508,7 @@ public:
     DepthSurface& operator=(const DepthSurface&) = delete;
 
     bool BackingUnchanged() {
-        if (target.samples == 1u || !samplingActive) return true;
+        if (target.samples == 1u || sampling.refusal.size() != 0u || sampling.initial[0].address == 0u) return true;
         for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
             if (index == 1u && target.htileDepthOnly) continue;
             const auto& range = sampling.initial[index];
@@ -2504,7 +2504,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
         if (candidate->active->load(std::memory_order_acquire) && !candidate->retired && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
-            if (candidate->target.samples != 1u && candidate->samplingActive && !candidate->BackingUnchanged()) {
+            if (candidate->target.samples != 1u && !candidate->BackingUnchanged()) {
                 candidate->active->store(false, std::memory_order_release);
                 retire(*candidate);
                 continue;
