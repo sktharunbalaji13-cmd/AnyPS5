@@ -118,6 +118,14 @@ bool htileUncompressed(std::uint32_t word) {
     return word == 0xfffc000fu || word == 0xfffff00fu;
 }
 
+VkFormat DepthAspectFormat(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT;
+        case VK_FORMAT_D16_UNORM: case VK_FORMAT_D16_UNORM_S8_UINT: return VK_FORMAT_D16_UNORM;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
 DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarget& target) {
     DepthSamplingState state;
     const auto refuse = [&](const char* reason) {
@@ -171,7 +179,8 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     if (uncompressedWords != 0u) {
         static std::atomic<int> reported{0};
         if (reported.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[depth] uncompressed native multisample depth import format=%d samples=%u depth-only=%d\n", static_cast<int>(target.format), target.samples, target.htileDepthOnly ? 1 : 0);
-        if (target.format != VK_FORMAT_D32_SFLOAT && target.format != VK_FORMAT_D16_UNORM) {
+        const auto aspectFormat = DepthAspectFormat(target.format);
+        if (aspectFormat == VK_FORMAT_UNDEFINED) {
             static std::atomic<int> reportedFallback{0};
             if (reportedFallback.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[depth] uncompressed native multisample depth of a combined format cannot be imported; clearing to %.1f instead\n", target.clearDepth);
             state.importDepth = false;
@@ -179,10 +188,13 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
             return refuse("native multisample depth uncompressed import needs the texture detiler");
         } else {
             VkFormatProperties properties{};
-            context.formatProperties(context.physical, target.format, &properties);
-            if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+            context.formatProperties(context.physical, aspectFormat, &properties);
+            VkImageFormatProperties sampleProperties{};
+            const auto result = context.imageFormatProperties(context.physical, aspectFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_STORAGE_BIT, 0, &sampleProperties);
+            const auto samples = static_cast<VkSampleCountFlagBits>(target.samples);
+            if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0 || result != VK_SUCCESS || (sampleProperties.sampleCounts & samples) == 0) {
                 state.importDepth = false;
-                return refuse("native multisample depth uncompressed import needs a storage-capable depth format");
+                return refuse("native multisample depth uncompressed import needs a storage-capable depth format at the target sample count");
             }
             state.importDepth = true;
         }
@@ -318,6 +330,7 @@ public:
         try {
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             if (SampleLocationsCompatibleDepth(context, hostFormat, target.samples)) info.flags = VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
+            if (this->sampling.importDepth) info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             info.imageType = VK_IMAGE_TYPE_2D;
             info.format = hostFormat;
             info.extent = {target.extent.width, target.extent.height, 1};
@@ -326,7 +339,6 @@ public:
             info.samples = static_cast<VkSampleCountFlagBits>(target.samples);
             info.tiling = VK_IMAGE_TILING_OPTIMAL;
             info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-            if (this->sampling.importDepth) info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
             sampleable = target.samples == 1;
             if (target.samples != 1) {
                 Require(context.imageFormatProperties != nullptr, "native multisample depth requires image format queries");
@@ -404,8 +416,11 @@ public:
                 VkImageViewCreateInfo uploadInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
                 uploadInfo.image = image;
                 uploadInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-                uploadInfo.format = hostFormat;
+                uploadInfo.format = DepthAspectFormat(hostFormat);
                 uploadInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                VkImageViewUsageCreateInfo uploadUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+                uploadUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+                uploadInfo.pNext = &uploadUsage;
                 Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &uploadInfo, nullptr, &uploadView), "vkCreateImageView depth import");
                 try {
                     RecordMemoryBarrier(context, upload, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
