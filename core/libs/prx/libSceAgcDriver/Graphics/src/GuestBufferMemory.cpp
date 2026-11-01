@@ -122,6 +122,7 @@ struct GuestBufferMemory::AddressSpace {
     std::vector<HeapRun> heapRuns;
     std::vector<ImageMirror*> sparseMirrors;
     std::unique_ptr<std::atomic<std::uint64_t>[]> verified;
+    std::unique_ptr<std::atomic<std::uint64_t>[]> writableVerified;
     std::vector<CopiedRange> copied;
     // The BDA table entries of `base`, in its order.
     std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
@@ -3098,6 +3099,7 @@ void planSpaceMirrors(GuestBufferMemory::AddressSpace& space) {
         run.last = space.heapMirrors.size();
     }
     space.verified = std::make_unique<std::atomic<std::uint64_t>[]>(space.heapRuns.size());
+    space.writableVerified = std::make_unique<std::atomic<std::uint64_t>[]>(space.writableMirrors.size());
 }
 
 std::vector<std::pair<std::size_t, std::uint64_t>> refreshHeapRuns(const GuestBufferMemory::AddressSpace& space, std::vector<RefreshBlock>& blocks) {
@@ -4466,9 +4468,17 @@ void GuestBufferMemory::AcquireRegistered() {
             // before any of them is dereferenced.
             served = true;
             mirrored = space->mirrored;
+            std::size_t writable = 0;
             for (const auto index : space->writableMirrors) {
                 const auto& region = space->base[index];
-                if (prepareRefresh(*region.mirror, region.begin, region.end - region.begin)) appendBlocks(blocks, *region.mirror, region.begin, region.end - region.begin);
+                const auto bytes = region.end - region.begin;
+                prepareRange(region.begin, bytes);
+                const auto generation = GuestMemory::CollectWrites(region.begin, bytes);
+                const auto since = space->writableVerified[writable].load(std::memory_order_relaxed);
+                if (since == 0 || !GuestMemory::UnchangedSince(region.begin, bytes, since)) {
+                    if (prepareRefresh(*region.mirror, region.begin, bytes)) appendBlocks(blocks, *region.mirror, region.begin, bytes);
+                }
+                space->writableVerified[writable++].store(generation, std::memory_order_relaxed);
             }
             lap(timing.mirrorsUs, at);
         }
