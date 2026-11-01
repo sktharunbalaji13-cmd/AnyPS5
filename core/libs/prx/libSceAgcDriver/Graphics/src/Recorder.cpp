@@ -4153,9 +4153,11 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
             // This also runs while the fence-failure throw unwinds: an allocation failure in the
             // rebuild keeps the previous snapshot, which is a superset (a stale entry only causes a
             // false hit, never a miss) rather than terminating.
-            try {
-                recorder.publishPendingWrites();
-            } catch (...) {
+            if (!batch->writes.empty()) {
+                try {
+                    recorder.publishPendingWrites();
+                } catch (...) {
+                }
             }
         }
     } finishingScope{*this, batch.get()};

@@ -6327,6 +6327,8 @@ void GuestBufferMemory::MarkDirectWrites() const {
 
 namespace {
 
+constexpr std::size_t WriteBackChunk = 4u << 20u;
+
 void storeChanged(std::uint64_t address, std::span<const std::byte> current, std::span<const std::byte> original) {
     const auto writable = GuestMemory::DescribeCommitted(address, current.size(), true);
     if (writable.whole) {
@@ -6463,16 +6465,23 @@ void GuestBufferMemory::WriteBack() {
                     else storeChanged(begin, current, reference->second);
                     continue;
                 }
-                std::vector<std::byte> current(length);
-                if (const auto readback = std::find_if(heapReadbacks.begin(), heapReadbacks.end(), [&](const auto& entry) { return entry.first == begin; }); readback != heapReadbacks.end()) {
-                    Require(readback->second->Bytes().size() == length, "heap mirror readback does not match its write-back");
-                    std::memcpy(current.data(), readback->second->Bytes().data(), length);
-                } else {
-                    mirror.resident->ReadDevice(begin, current);
+                std::vector<std::byte> current;
+                for (std::size_t done = 0; done < length;) {
+                    const auto part = std::min<std::size_t>(WriteBackChunk, length - done);
+                    current.resize(part);
+                    const auto from = begin + done;
+                    if (const auto readback = std::find_if(heapReadbacks.begin(), heapReadbacks.end(), [&](const auto& entry) { return entry.first == begin; }); readback != heapReadbacks.end()) {
+                        Require(readback->second->Bytes().size() == length, "heap mirror readback does not match its write-back");
+                        std::memcpy(current.data(), readback->second->Bytes().data() + done, part);
+                    } else {
+                        mirror.resident->ReadDevice(from, current);
+                    }
+                    mirror.resident->Store(from, current);
+                    const std::span<const std::byte> original(reference->second.data() + done, part);
+                    if (mirror.sparse) storeSparse(mirror, from, current, original);
+                    else storeChanged(from, current, original);
+                    done += part;
                 }
-                mirror.resident->Store(begin, current);
-                if (mirror.sparse) storeSparse(mirror, begin, current, reference->second);
-                else storeChanged(begin, current, reference->second);
                 continue;
             }
             const auto current = mirror.buffer->Bytes().subspan(offset, length);

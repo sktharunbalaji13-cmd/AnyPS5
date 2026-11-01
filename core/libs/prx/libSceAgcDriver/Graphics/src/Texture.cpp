@@ -4680,7 +4680,7 @@ bool StorageTexture::FlushAllPendingUntil(const char* reason, const std::functio
         std::lock_guard lock(pending.mutex);
         for (const auto* texture : pending.textures) ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
     }
-    constexpr std::size_t piece = std::size_t{4} << 20u;
+    constexpr std::size_t piece = std::size_t{64} << 20u;
     for (const auto& [address, bytes] : ranges) {
         for (std::size_t offset = 0; offset < bytes; offset += piece) {
             if (stop()) return false;
