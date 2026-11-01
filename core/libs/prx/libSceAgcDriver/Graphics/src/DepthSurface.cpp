@@ -172,17 +172,20 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
         static std::atomic<int> reported{0};
         if (reported.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[depth] uncompressed native multisample depth import format=%d samples=%u depth-only=%d\n", static_cast<int>(target.format), target.samples, target.htileDepthOnly ? 1 : 0);
         if (target.format != VK_FORMAT_D32_SFLOAT && target.format != VK_FORMAT_D16_UNORM) {
+            static std::atomic<int> reportedFallback{0};
+            if (reportedFallback.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[depth] uncompressed native multisample depth of a combined format cannot be imported; clearing to %.1f instead\n", target.clearDepth);
             state.importDepth = false;
-            return refuse("native multisample depth uncompressed import for a combined format is not implemented");
+        } else if (context.detiler == nullptr) {
+            return refuse("native multisample depth uncompressed import needs the texture detiler");
+        } else {
+            VkFormatProperties properties{};
+            context.formatProperties(context.physical, target.format, &properties);
+            if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+                state.importDepth = false;
+                return refuse("native multisample depth uncompressed import needs a storage-capable depth format");
+            }
+            state.importDepth = true;
         }
-        if (context.detiler == nullptr) return refuse("native multisample depth uncompressed import needs the texture detiler");
-        VkFormatProperties properties{};
-        context.formatProperties(context.physical, target.format, &properties);
-        if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
-            state.importDepth = false;
-            return refuse("native multisample depth uncompressed import needs a storage-capable depth format");
-        }
-        state.importDepth = true;
     } else if (target.clearDepth != 0.0f && target.clearDepth != 1.0f) {
         return refuse("native multisample depth initial clear value is not implemented");
     }
