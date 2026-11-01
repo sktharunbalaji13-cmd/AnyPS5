@@ -107,7 +107,7 @@ struct DepthSamplingState {
 
 bool htileProvesClear(std::uint32_t word, bool depthOnly, float clearDepth) {
     if ((word & 15u) == 15u && word != 0xffffffffu) return false;
-    const auto depth = depthOnly ? word : word & 0xfffff00fu;
+    const auto depth = depthOnly ? word & 0xfffffff0u : word & 0xfffff00fu;
     if (depth == 0u) return clearDepth == 0.0f;
     if (depth == (depthOnly ? 0xfffffff0u : 0xfffc0000u)) return clearDepth == 1.0f;
     return false;
@@ -148,7 +148,11 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(metadata)), 256u);
     if (!target.htilePipeAligned && std::adjacent_find(metadata.begin(), metadata.end(), [](std::uint32_t first, std::uint32_t second) { return first != second; }) != metadata.end()) return refuse("native multisample depth HTILE that is not pipe-aligned holds more than one word");
     for (const auto word : metadata) {
-        if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) return refuse("native multisample depth initial HTILE does not prove its clear value");
+        if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) {
+            static thread_local char text[128];
+            std::snprintf(text, sizeof(text), "native multisample depth initial HTILE word 0x%08x does not prove its clear value", word);
+            return refuse(text);
+        }
     }
     for (const auto& range : state.initial) GuestMemory::CollectWritesUncached(range.address, range.bytes);
     if (!GuestMemory::UnchangedSinceAll(state.initial)) return refuse("guest writes raced native multisample depth import");
