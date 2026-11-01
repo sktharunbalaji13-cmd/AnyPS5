@@ -1143,22 +1143,22 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
                         Require(AgcDriver::GuestMemory::CollectWritesUncached(target.htileAddress, static_cast<std::size_t>(metadataBytes)) > beforeImport, "HTILE import window did not stamp its changed page");
                     }
                     if (completionCandidate && fault == ClearFault::None) {
-                        TargetRefuses([&] {
+                        PublicationRefuses(format, [&] {
                             auto uploadContext = context;
                             uploadContext.hostImportAlignment = 0;
                             GuestBufferMemory buffer(uploadContext);
                             buffer.AddWritable(target.htileAddress, metadataBytes);
                             buffer.Upload(false);
-                        }, "sample-preserving guest publication");
+                        });
                         const auto accepted = std::pair{target.htileAddress, static_cast<std::size_t>(metadataBytes)};
                         RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, metadataBytes, accepted);
-                        TargetRefuses([&] { RequireNoResidentDepthRead_nid_no_patch(target.address, bytes, accepted); }, "sample-preserving guest publication");
-                        TargetRefuses([&] { RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, metadataBytes + 1u, accepted); }, "sample-preserving guest publication");
+                        PublicationRefuses(format, [&] { RequireNoResidentDepthRead_nid_no_patch(target.address, bytes, accepted); });
+                        PublicationRefuses(format, [&] { RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, metadataBytes + 1u, accepted); });
                         Require(DepthSurfaceAt(target.address), "an accepted HTILE buffer access retired its native depth owner");
                     }
                     if (completionCandidate) ArmHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes));
                     if (completionCandidate && fault == ClearFault::None) {
-                        TargetRefuses([&] { RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, metadataBytes, std::pair{target.htileAddress, static_cast<std::size_t>(metadataBytes)}); }, "sample-preserving guest publication");
+                        PublicationRefuses(format, [&] { RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, metadataBytes, std::pair{target.htileAddress, static_cast<std::size_t>(metadataBytes)}); });
                     }
                     if (fault == ClearFault::Overlap) NoteHtileDepthClear(target.htileAddress, static_cast<std::size_t>(metadataBytes), nativeBytes);
                     const auto storedBytes = fault == ClearFault::PartialStore ? 4u : static_cast<std::size_t>(metadataBytes);

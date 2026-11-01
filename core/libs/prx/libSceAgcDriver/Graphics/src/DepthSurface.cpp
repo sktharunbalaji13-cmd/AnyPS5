@@ -1822,7 +1822,7 @@ std::uint32_t expandedHtileWord(std::uint32_t word, bool stencilInHtile, VkImage
 
 void DepthSurface::PublishToGuest() {
     Require(target.format != VK_FORMAT_D16_UNORM, "guest publication of a written native multisample D16 depth is not implemented");
-    Require(target.format == VK_FORMAT_D32_SFLOAT && hostFormat == target.format, "guest publication of a written native multisample depth that the device stores in another format is not implemented");
+    Require((target.format == VK_FORMAT_D32_SFLOAT || target.format == VK_FORMAT_D32_SFLOAT_S8_UINT) && hostFormat == target.format, "guest publication of a written native multisample depth stored as vk format " + std::to_string(static_cast<int>(target.format)) + " as vk format " + std::to_string(static_cast<int>(hostFormat)) + " is not implemented");
     Require(sampleable, "guest publication of a written native multisample depth the device cannot sample is not implemented");
     Require(context.detiler != nullptr, "guest publication of a written native multisample depth needs the texture detiler");
     ApplyFastClear();
