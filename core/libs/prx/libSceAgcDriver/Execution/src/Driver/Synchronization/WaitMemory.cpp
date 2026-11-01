@@ -191,6 +191,12 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             ++outcomes.fromRecorderSameQueue;
             if (!hit->late) epochPoint.bump = false;
         } else {
+            const std::uint64_t live = awaitedBytes == 8 ? *reinterpret_cast<const volatile std::uint64_t*>(awaited) : *reinterpret_cast<const volatile std::uint32_t*>(awaited);
+            if (!Pm4::WaitComparesValue(packet, live)) {
+                notePendingWait(packet, queue, received);
+                if (trace) traceLate("not landed, waiting for memory", hit, refusal);
+                return false;
+            }
             notePendingWait(packet, queue, received);
         }
         return true;
