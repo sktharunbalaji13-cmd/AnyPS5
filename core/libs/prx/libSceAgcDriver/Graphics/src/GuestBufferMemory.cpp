@@ -105,6 +105,7 @@ struct ImageMirror {
 struct GuestBufferMemory::AddressSpace {
     std::uint64_t generation = 0;
     std::uint64_t importsEpoch = 0;
+    std::uint64_t retireEpoch = 0;
     VkDevice device = VK_NULL_HANDLE;
     // Identity for the life of this space (see CachedAddressTable).
     std::uint64_t serial = 0;
@@ -278,6 +279,7 @@ struct HostImports {
     // Bumped whenever an import is dropped, so HostImport pointers taken under the lock earlier can be
     // reused while it is unchanged.
     std::uint64_t epoch = 1;
+    std::uint64_t retireEpoch = 0;
     VkDevice watchDevice = VK_NULL_HANDLE;
     bool unwatchImports = false;
     bool unwatchDmaBufImports = false;
@@ -446,6 +448,7 @@ void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, H
     // size); the holder below outlives the batch that copies them.
     RetireShadow(device, it->second, [&lease, joined = it->second.joined](std::uint64_t begin, std::uint64_t end) { return runCovers(lease, begin, end) || (joined && joinedCovers(lease, begin, end)); });
     ++state.epoch;
+    ++state.retireEpoch;
     state.liveBytes -= it->second.pinnedBytes;
     auto holder = std::make_shared<RetiredImport>(state.device, state.destroyBuffer, state.freeMemory, state.imports.extract(it));
 #ifdef _WIN32
@@ -2344,6 +2347,7 @@ void refreshImports(const Context& context, HostImports& state, const GuestAlloc
         state.pendingImports.clear();
         state.refreshedGeneration = 0;
         ++state.epoch;
+        ++state.retireEpoch;
     }
     if (state.destroyBuffer == nullptr) state.destroyBuffer = context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer");
     if (state.freeMemory == nullptr) state.freeMemory = context.Function<PFN_vkFreeMemory>("vkFreeMemory");
@@ -3807,6 +3811,7 @@ void ClearHostImports(VkDevice device) {
     state.device = VK_NULL_HANDLE;
     state.refreshedGeneration = 0;
     ++state.epoch;
+    ++state.retireEpoch;
 }
 
 namespace {
@@ -4417,11 +4422,25 @@ void GuestBufferMemory::AcquireRegistered() {
             auto& state = Imports();
             std::lock_guard lock(state.mutex);
             const auto keeps = [&](ImageMirror* mirror) { return heapMirrorWatched(*mirror) || !importsNow(context, state, current->lease, mirror->base); };
+            static const bool surviveEpoch = std::getenv("APS5_SPACE_SURVIVE_EPOCH") != nullptr;
+            const auto stands = [&] {
+                if (current == nullptr) return false;
+                if (!surviveEpoch) return current->importsEpoch == state.epoch;
+                if (current->retireEpoch != state.retireEpoch) return false;
+                std::vector<const HostImport*> live;
+                live.reserve(state.imports.size());
+                for (const auto& held : state.imports) live.push_back(&held.second);
+                std::sort(live.begin(), live.end());
+                for (const auto& region : current->base) {
+                    if (region.direct != nullptr && !std::binary_search(live.begin(), live.end(), region.direct)) return false;
+                }
+                return true;
+            };
             if (current == nullptr) (spaces.droppedByWaiter.exchange(false, std::memory_order_relaxed) ? spaces.rebuiltWaiterDrop : spaces.rebuiltFirst).fetch_add(1, std::memory_order_relaxed);
             else if (current->device != context.device) spaces.rebuiltDevice.fetch_add(1, std::memory_order_relaxed);
             else if (current->generation != generation) spaces.rebuiltGeneration.fetch_add(1, std::memory_order_relaxed);
-            else if (current->importsEpoch != state.epoch) spaces.rebuiltEpoch.fetch_add(1, std::memory_order_relaxed);
-            else hit = std::all_of(current->heapMirrors.begin(), current->heapMirrors.end(), keeps) && std::all_of(current->sparseMirrors.begin(), current->sparseMirrors.end(), keeps);
+            else if (!stands()) spaces.rebuiltEpoch.fetch_add(1, std::memory_order_relaxed);
+            else hit = std::all_of(current->heapMirrors.begin(), current->heapMirrors.end(), keeps) && std::all_of(current->sparseMirrors.begin(), current->sparseMirrors.end(), keeps) && stands();
             importFloor = state.useCounter + 1;
             if (hit) {
                 const auto stamp = ++state.useCounter;
@@ -4498,6 +4517,7 @@ void GuestBufferMemory::AcquireRegistered() {
             // completions can retire an import already taken; that moves the epoch, and Upload then
             // re-checks every pointer instead of trusting it.
             importsEpoch = state.epoch;
+            importsRetireEpoch = state.retireEpoch;
         }
         lap(timing.importsUs, at);
         // One pass in the registry's (ascending) order, so the regions come out sorted for AddSnapshot.
@@ -4654,7 +4674,7 @@ void GuestBufferMemory::AcquireRegistered() {
             {
                 auto& state = Imports();
                 std::lock_guard lock(state.mutex);
-                if (state.epoch != importsEpoch) {
+                if ((std::getenv("APS5_SPACE_SURVIVE_EPOCH") != nullptr ? state.retireEpoch != importsRetireEpoch : state.epoch != importsEpoch)) {
                     publish = false;
                     spaces.unpublished.fetch_add(1, std::memory_order_relaxed);
                 } else {
@@ -4681,6 +4701,7 @@ void GuestBufferMemory::AcquireRegistered() {
                 auto built = std::make_shared<AddressSpace>();
                 built->generation = generation;
                 built->importsEpoch = importsEpoch;
+                built->retireEpoch = importsRetireEpoch;
                 built->device = context.device;
                 built->serial = spaces.serials.fetch_add(1, std::memory_order_relaxed) + 1;
                 built->lease = std::move(lease);
@@ -5499,6 +5520,7 @@ void GuestBufferMemory::UploadPrepare(bool addressable) {
             region.pending = true;
         }
         importsEpoch = state.epoch;
+        importsRetireEpoch = state.retireEpoch;
     }
     if (profile) importUs.fetch_add(microsecondsSince(started), std::memory_order_relaxed);
     // Copies that need no device work: a range no descriptor writes needs no reference copy, and
@@ -5596,7 +5618,7 @@ void GuestBufferMemory::UploadFinish(bool addressable, std::optional<std::pair<s
         std::lock_guard lock(state.mutex);
         if (importsStale(context, state)) refreshImports(context, state, importRanges());
         importsRefreshed = true;
-        if (state.epoch != space->importsEpoch) {
+        if ((std::getenv("APS5_SPACE_SURVIVE_EPOCH") != nullptr ? state.retireEpoch != space->retireEpoch : state.epoch != space->importsEpoch)) {
             Spaces().dissolvedImports.fetch_add(1, std::memory_order_relaxed);
             dissolveSpace(true);
         }
