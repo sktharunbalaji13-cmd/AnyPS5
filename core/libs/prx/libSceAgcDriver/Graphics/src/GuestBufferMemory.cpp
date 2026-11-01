@@ -6357,7 +6357,9 @@ void GuestBufferMemory::addAddressStoreSpans() {
             writes.emplace_back(region.begin, served);
             return;
         }
-        for (const auto& [first, last] : clipPieces(region.mirror->committed, region.begin, served)) writes.emplace_back(first, last);
+        for (const auto& [first, last] : clipPieces(region.mirror->committed, region.begin, served)) {
+            if ((last - first) <= (heapMirrorBudget() / 2)) writes.emplace_back(first, last);
+        }
     };
     if (space != nullptr) {
         for (const auto& region : space->base) add(region);
@@ -6375,17 +6377,18 @@ void GuestBufferMemory::takeHeapReferences() {
         auto& mirror = *found->mirror;
         const auto served = std::min(end, servedEnd(*found));
         if (begin >= served) continue;
+        if ((served - begin) > (heapMirrorBudget() / 2)) continue;
         try {
             growResident(mirror, {{begin, served}});
-        } catch (const std::runtime_error& error) {
+            std::vector<std::byte> bytes(static_cast<std::size_t>(served - begin));
+            if (mirror.resident != nullptr) mirror.resident->Read(begin, bytes);
+            else std::memcpy(bytes.data(), mirror.buffer->Bytes().data() + (begin - mirror.base), bytes.size());
+            heapReferences.emplace_back(begin, std::move(bytes));
+        } catch (const std::exception& error) {
             static std::atomic<int> reported{0};
             if (reported.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[gpu] %s; skipping heap reference snapshot\n", error.what());
             continue;
         }
-        std::vector<std::byte> bytes(static_cast<std::size_t>(served - begin));
-        if (mirror.resident != nullptr) mirror.resident->Read(begin, bytes);
-        else std::memcpy(bytes.data(), mirror.buffer->Bytes().data() + (begin - mirror.base), bytes.size());
-        heapReferences.emplace_back(begin, std::move(bytes));
     }
 }
 

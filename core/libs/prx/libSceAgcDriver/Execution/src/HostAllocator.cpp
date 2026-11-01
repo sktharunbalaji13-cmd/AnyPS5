@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <intrin.h>
 #include <malloc.h>
@@ -170,7 +171,10 @@ void* Allocate(std::size_t bytes) {
     for (;;) {
         if (void* block = TryAllocate(bytes)) return block;
         const auto handler = std::get_new_handler();
-        if (handler == nullptr) throw std::bad_alloc();
+        if (handler == nullptr) {
+            std::fprintf(stderr, "[alloc] HostAllocator::Allocate failed for %zu bytes (0x%zx)\n", bytes, bytes);
+            throw std::bad_alloc();
+        }
         handler();
     }
 }
