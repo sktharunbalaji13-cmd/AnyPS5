@@ -360,6 +360,18 @@ public:
     DepthSurface(const DepthSurface&) = delete;
     DepthSurface& operator=(const DepthSurface&) = delete;
 
+    bool BackingUnchanged() {
+        if (target.samples == 1u || !samplingActive) return true;
+        for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
+            if (index == 1u && target.htileDepthOnly) continue;
+            const auto& range = sampling.initial[index];
+            if (!GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), range.bytes) || !GuestMemory::Watched(range.address, range.bytes)) return false;
+            GuestMemory::CollectWritesUncached(range.address, range.bytes);
+            if (!GuestMemory::UnchangedSince(range.address, range.bytes, range.generation)) return false;
+        }
+        return true;
+    }
+
     void CheckCurrent() {
         if (target.samples == 1u) return;
         const auto clearLease = clearGeneration == 0u ? GuestAllocations::Lease{} : GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
@@ -2343,6 +2355,11 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
         if (candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
+            if (candidate->target.samples != 1u && candidate->samplingActive && !candidate->BackingUnchanged()) {
+                candidate->active->store(false, std::memory_order_release);
+                candidate->retired = true;
+                continue;
+            }
             surface = candidate.get();
             break;
         }
