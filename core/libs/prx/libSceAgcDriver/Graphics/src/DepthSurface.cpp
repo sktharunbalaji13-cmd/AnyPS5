@@ -1818,7 +1818,7 @@ void releaseRetired(const Context& context) {
     auto& list = surfaces();
     for (auto it = list.begin(); it != list.end();) {
         const auto& surface = **it;
-        if (!surface.retired || surface.context.device != context.device || surface.target.samples != 1u || surface.SampledElsewhere()) {
+        if (!surface.retired || surface.context.device != context.device || surface.SampledElsewhere()) {
             ++it;
             continue;
         }
@@ -1889,7 +1889,7 @@ void publishWrittenDepth(std::span<const std::shared_ptr<std::atomic<bool>>> wri
     std::lock_guard lock(surfacesMutex());
     for (const auto& flag : written) {
         const auto found = std::ranges::find_if(surfaces(), [&](const auto& surface) { return surface->hostWritten == flag; });
-        Require(found != surfaces().end(), "the written native multisample depth surface is not resident");
+        if (found == surfaces().end()) continue;
         if (!(*found)->active->load(std::memory_order_acquire) || (*found)->retired) continue;
         (*found)->PublishToGuest();
     }
