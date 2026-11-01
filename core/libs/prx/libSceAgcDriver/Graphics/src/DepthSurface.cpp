@@ -563,7 +563,8 @@ public:
     }
 
     bool SampledElsewhere() const {
-        return std::any_of(textures.begin(), textures.end(), [](const auto& entry) { return entry.second.use_count() > 1; });
+        const auto sampled = [](const auto& entry) { return entry.second.use_count() > 1; };
+        return std::any_of(textures.begin(), textures.end(), sampled) || std::any_of(stencilCopy.textures.begin(), stencilCopy.textures.end(), sampled);
     }
 
     void NoteHostWrite() {
@@ -2356,10 +2357,10 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
     const bool cleared = takeClearedHtile(target);
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
-        if (candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
+        if (candidate->active->load(std::memory_order_acquire) && !candidate->retired && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
             if (candidate->target.samples != 1u && candidate->samplingActive && !candidate->BackingUnchanged()) {
                 candidate->active->store(false, std::memory_order_release);
-                candidate->retired = true;
+                retire(*candidate);
                 continue;
             }
             surface = candidate.get();
