@@ -2488,6 +2488,14 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         }
         refreshGeneration();
     }
+    static const bool keepAlias = std::getenv("APS5_KEEP_ALIAS_CONTENTS") != nullptr;
+    if (keepAlias && flushed && !keysChanged && !cpuWrote && !anyStored && !anyBorrowed) {
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+            if (!outsideChanged || !outside[layer]) layerGeneration[layer] = currentFor(layer);
+        }
+        refreshGeneration();
+        return true;
+    }
     if (std::any_of(changed.begin(), changed.end(), [](bool selected) { return selected; })) {
         uploadReason = keysChanged ? "keys" : cpuWrote ? "cpu" : generation == 0 ? "untracked" : flushed ? "flushed" : "store";
         upload(&changed);
