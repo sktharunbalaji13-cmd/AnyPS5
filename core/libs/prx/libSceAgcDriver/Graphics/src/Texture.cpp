@@ -2489,7 +2489,7 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         refreshGeneration();
     }
     static const bool keepAlias = std::getenv("APS5_KEEP_ALIAS_CONTENTS") != nullptr;
-    if (keepAlias && flushed && !keysChanged && !cpuWrote && !anyStored && !anyBorrowed) {
+    if (keepAlias && flushed && !keysChanged && !anyStored && !anyBorrowed) {
         for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
             if (!outsideChanged || !outside[layer]) layerGeneration[layer] = currentFor(layer);
         }
