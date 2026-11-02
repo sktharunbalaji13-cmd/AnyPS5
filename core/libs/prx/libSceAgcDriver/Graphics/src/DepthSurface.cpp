@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
 #include <array>
@@ -104,6 +105,7 @@ struct DepthSamplingState {
     std::optional<std::uint8_t> aliasStencil;
     std::optional<MultisampleColorAlias> unprovenStencil;
     std::optional<MultisampleColorAlias> depthAlias;
+    bool uncompressed = false;
 
     void Refuse(const char* reason) {
         if (refusal.empty()) refusal = reason;
@@ -148,6 +150,11 @@ void reportAlias(const MultisampleColorAlias& alias, const GuestMemory::Unchange
 
 bool htileProvesStencilClear(std::uint32_t word) {
     return ((word >> 8u) & 3u) == 0u;
+}
+
+bool htileIsUncompressed(std::uint32_t word, bool depthOnly) {
+    if (depthOnly) return word == 0xfffc000fu;
+    return word == 0xfffc000fu || word == 0xfffff00fu;
 }
 
 bool htileProvesClear(std::uint32_t word, bool depthOnly, float clearDepth) {
@@ -233,9 +240,20 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
     std::vector<std::uint32_t> metadata(htile.bytes / sizeof(std::uint32_t));
     GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(metadata)), 256u);
     if (!target.htilePipeAligned && std::adjacent_find(metadata.begin(), metadata.end(), [](std::uint32_t first, std::uint32_t second) { return first != second; }) != metadata.end()) return refuse("native multisample depth HTILE that is not pipe-aligned holds more than one word");
+    bool allUncompressed = !metadata.empty();
     for (const auto word : metadata) {
-        if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) return refuse("native multisample depth initial HTILE does not prove its clear value");
-        if (stencil && !stencilPlane && !htileProvesStencilClear(word)) return refuse("native multisample stencil initial HTILE does not prove its clear value");
+        if (!htileIsUncompressed(word, target.htileDepthOnly)) {
+            allUncompressed = false;
+            break;
+        }
+    }
+    if (allUncompressed) {
+        state.uncompressed = true;
+    } else {
+        for (const auto word : metadata) {
+            if (!htileProvesClear(word, target.htileDepthOnly, target.clearDepth)) return refuse("native multisample depth initial HTILE does not prove its clear value");
+            if (stencil && !stencilPlane && !htileProvesStencilClear(word)) return refuse("native multisample stencil initial HTILE does not prove its clear value");
+        }
     }
     if (stencilPlane && !state.aliasStencil && !state.unprovenStencil) {
         std::vector<std::uint8_t> plane(state.initial[2].bytes);
@@ -433,8 +451,10 @@ public:
             toGeneral.subresourceRange = viewInfo.subresourceRange;
             const auto barrier = context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier");
             barrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
-            const VkClearDepthStencilValue clear{target.clearDepth, this->sampling.aliasStencil.value_or(target.clearStencil)};
-            context.Function<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &toGeneral.subresourceRange);
+            if (!this->sampling.uncompressed) {
+                const VkClearDepthStencilValue clear{target.clearDepth, this->sampling.aliasStencil.value_or(target.clearStencil)};
+                context.Function<PFN_vkCmdClearDepthStencilImage>("vkCmdClearDepthStencilImage")(commands, image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &toGeneral.subresourceRange);
+            }
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
             if (batch) batch->SubmitAndWait();
             else Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
@@ -500,7 +520,11 @@ public:
             const bool gpuFill = clearPattern.has_value() && clearFillNote != 0u && (queuedFill || newestHtileNote == 0u);
             for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
                 const auto& plane = sampling.initial[index];
-                if (index != 1u) Require(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes over native multisample depth are not implemented");
+                if (index != 1u) {
+                    if (!AgcDriver::DriverDetail::SkipRefusedDraws()) {
+                        Require(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes over native multisample depth are not implemented");
+                    }
+                }
             }
             Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
             Require(gpuFill || clearStored || GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
@@ -522,7 +546,9 @@ public:
             clearAspects = 0u;
             pendingClear = 0u;
         }
-        Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes over native multisample depth are not implemented");
+        if (!AgcDriver::DriverDetail::SkipRefusedDraws()) {
+            Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes over native multisample depth are not implemented");
+        }
     }
 
     void CheckResource(const GuestTextureResource& resource) const {
@@ -695,7 +721,21 @@ public:
     }
 
     bool SampledElsewhere() const {
-        return std::any_of(textures.begin(), textures.end(), [](const auto& entry) { return entry.second.use_count() > 1; });
+        const auto inUse = [](const auto& entry) { return entry.second.use_count() > 1; };
+        return std::any_of(textures.begin(), textures.end(), inUse) || std::any_of(stencilCopy.textures.begin(), stencilCopy.textures.end(), inUse);
+    }
+
+    bool BackingUnchanged() const {
+        if (target.samples == 1u) return true;
+        const auto* recorder = RecorderFor(context);
+        for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
+            if (index == 1u) continue;
+            const auto& plane = sampling.initial[index];
+            if (recorder != nullptr && recorder->PendingWriteOverlaps(plane.address, plane.bytes)) return false;
+            GuestMemory::CollectWritesUncached(plane.address, plane.bytes);
+            if (!GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation)) return false;
+        }
+        return true;
     }
 
     void NoteHostWrite() {
@@ -1961,7 +2001,7 @@ void releaseRetired(const Context& context) {
     auto& list = surfaces();
     for (auto it = list.begin(); it != list.end();) {
         const auto& surface = **it;
-        if (!surface.retired || surface.context.device != context.device || surface.target.samples != 1u || surface.SampledElsewhere()) {
+        if (!surface.retired || surface.context.device != context.device || surface.SampledElsewhere()) {
             ++it;
             continue;
         }
@@ -2472,6 +2512,10 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
         if (candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
+            if (!candidate->BackingUnchanged()) {
+                retire(*candidate);
+                continue;
+            }
             surface = candidate.get();
             break;
         }
