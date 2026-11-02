@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include <array>
 #include <stdexcept>
 #include <string>
@@ -88,44 +89,78 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
 
     const auto borderColorType = (words[3] >> 30u) & 0x3u;
 
-    Require(!forceUnormCoords || unnormalizedProven, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
-    if (forceUnormCoords) {
-        Require(!isAnisoFilter(xyMagFilter) && !isAnisoFilter(xyMinFilter), "guest sampler descriptor uses unnormalized coordinates with anisotropic filtering, which is not implemented");
-        Require(clampX == 0u || clampX == 2u || clampX == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampX) + " on X; only clamp-to-last-texel and clamp-to-border are implemented");
-        Require(clampY == 0u || clampY == 2u || clampY == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampY) + " on Y; only clamp-to-last-texel and clamp-to-border are implemented");
-        Require(!mcCoordTrunc, "guest sampler descriptor uses unnormalized coordinates with MC_COORD_TRUNC, which is not implemented");
-    } else {
-        Require(!unnormalizedProven, "guest sampler descriptor is bound as unnormalized without FORCE_UNNORMALIZED");
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(!forceUnormCoords || unnormalizedProven, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
     }
-    Require(!forceSrgb || forceDegammaPaired, "guest sampler descriptor forces sRGB decoding which is not implemented");
+    if (forceUnormCoords) {
+        if (!DriverDetail::SkipRefusedDraws()) {
+            Require(!isAnisoFilter(xyMagFilter) && !isAnisoFilter(xyMinFilter), "guest sampler descriptor uses unnormalized coordinates with anisotropic filtering, which is not implemented");
+            Require(clampX == 0u || clampX == 2u || clampX == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampX) + " on X; only clamp-to-last-texel and clamp-to-border are implemented");
+            Require(clampY == 0u || clampY == 2u || clampY == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampY) + " on Y; only clamp-to-last-texel and clamp-to-border are implemented");
+            Require(!mcCoordTrunc, "guest sampler descriptor uses unnormalized coordinates with MC_COORD_TRUNC, which is not implemented");
+        }
+    } else {
+        if (!DriverDetail::SkipRefusedDraws()) {
+            Require(!unnormalizedProven, "guest sampler descriptor is bound as unnormalized without FORCE_UNNORMALIZED");
+        }
+    }
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(!forceSrgb || forceDegammaPaired, "guest sampler descriptor forces sRGB decoding which is not implemented");
+    }
     // The perf fields trade mip/depth precision for speed and are accepted as is. ANISO_THRESHOLD and
     // ANISO_BIAS only tune how many anisotropic taps the hardware takes; the host filter picks its own.
     static_cast<void>(truncCoord);
     static_cast<void>(anisoThreshold);
     static_cast<void>(anisoBias);
-    const auto reductionMode = toVkReductionMode(filterMode);
-    Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
-    static_cast<void>(lodBiasSec);
-    Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
-    static_cast<void>(anisoOverride);
-    Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
-    if (mipFilter > 2u) Require(false, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
-    Require(mipFilter != 2u || reductionMode == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT, "guest sampler descriptor combines a min or max reduction with a linear mip filter, which is not implemented");
+    auto effectiveMipFilter = mipFilter;
+    if (effectiveMipFilter > 2u) {
+        if (!DriverDetail::SkipRefusedDraws()) {
+            Require(false, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
+        }
+        effectiveMipFilter = 2u;
+    }
+    auto reductionMode = toVkReductionMode(filterMode);
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
+        static_cast<void>(lodBiasSec);
+        Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
+        static_cast<void>(anisoOverride);
+        Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
+        Require(effectiveMipFilter != 2u || reductionMode == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT, "guest sampler descriptor combines a min or max reduction with a linear mip filter, which is not implemented");
+    } else {
+        static_cast<void>(disableDegamma);
+        static_cast<void>(lodBiasSec);
+        static_cast<void>(pointPreclamp);
+        static_cast<void>(anisoOverride);
+        static_cast<void>(blendZeroPrt);
+        if (effectiveMipFilter == 2u && reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT) {
+            reductionMode = VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT;
+        }
+    }
 
-    const auto aniso = isAnisoFilter(xyMagFilter) || isAnisoFilter(xyMinFilter);
+    const auto aniso = !forceUnormCoords && (isAnisoFilter(xyMagFilter) || isAnisoFilter(xyMinFilter));
     auto anisoRatio = 1.0f;
     if (aniso) {
-        if (maxAnisoRatio > 4u) Require(false, "guest sampler descriptor uses an unknown anisotropy ratio " + std::to_string(maxAnisoRatio));
+        if (maxAnisoRatio > 4u) {
+            if (!DriverDetail::SkipRefusedDraws()) {
+                Require(false, "guest sampler descriptor uses an unknown anisotropy ratio " + std::to_string(maxAnisoRatio));
+            }
+        }
         const std::array ratios{1.0f, 2.0f, 4.0f, 8.0f, 16.0f};
-        anisoRatio = ratios[maxAnisoRatio];
+        anisoRatio = ratios[std::min<std::uint32_t>(maxAnisoRatio, 4u)];
     }
 
     auto minLod = 0.0f;
     auto maxLod = 0.0f;
-    if (mipFilter != 0u) {
-        Require(minLodRaw <= maxLodRaw, "guest sampler descriptor has a minimum LOD past its maximum LOD");
+    if (effectiveMipFilter != 0u) {
+        if (!DriverDetail::SkipRefusedDraws()) {
+            Require(minLodRaw <= maxLodRaw, "guest sampler descriptor has a minimum LOD past its maximum LOD");
+        }
         minLod = static_cast<float>(minLodRaw) / 256.0f;
         maxLod = static_cast<float>(maxLodRaw) / 256.0f;
+        if (minLod > maxLod) {
+            std::swap(minLod, maxLod);
+        }
     }
 
     VkBorderColor border;
@@ -134,7 +169,11 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
         case 1: border = integerBorder ? VK_BORDER_COLOR_INT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK; break;
         case 2: border = integerBorder ? VK_BORDER_COLOR_INT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; break;
         default:
-            if (readsBorderColor(clampX) || readsBorderColor(clampY) || readsBorderColor(clampZ)) throw std::runtime_error("AGC graphics: guest sampler descriptor uses a border color table which is not implemented");
+            if (readsBorderColor(clampX) || readsBorderColor(clampY) || readsBorderColor(clampZ)) {
+                if (!DriverDetail::SkipRefusedDraws()) {
+                    throw std::runtime_error("AGC graphics: guest sampler descriptor uses a border color table which is not implemented");
+                }
+            }
             border = integerBorder ? VK_BORDER_COLOR_INT_TRANSPARENT_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
             break;
     }
@@ -142,7 +181,7 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     GuestSamplerResource result{};
     result.magFilter = toVkFilter(xyMagFilter);
     result.minFilter = toVkFilter(xyMinFilter);
-    result.mipmapMode = mipFilter == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    result.mipmapMode = effectiveMipFilter == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     result.addressModeU = toVkAddressMode(clampX);
     result.addressModeV = toVkAddressMode(clampY);
     result.addressModeW = toVkAddressMode(clampZ);
@@ -161,8 +200,9 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
         result.unnormalizedCoordinates = true;
         result.minFilter = result.magFilter;
         result.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        result.addressModeU = clampX == 6u ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        result.addressModeV = clampY == 6u ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        result.addressModeU = (clampX == 4u || clampX == 6u) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        result.addressModeV = (clampY == 4u || clampY == 6u) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        result.addressModeW = (clampZ == 4u || clampZ == 6u) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         result.minLod = 0.0f;
         result.maxLod = 0.0f;
         result.lodBias = 0.0f;
@@ -175,7 +215,10 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
 std::optional<std::array<std::uint32_t, 4>> SingleLevelSamplerWords(std::span<const std::uint32_t, 4> words, bool singleLevelImage, bool mipmappedImage) {
     const auto filters = words[2];
     if (((filters >> 29u) & 1u) == 0 || !singleLevelImage || (!isAnisoFilter((filters >> 20u) & 3u) && !isAnisoFilter((filters >> 22u) & 3u))) return std::nullopt;
-    Require(!mipmappedImage, "guest sampler with ANISO_OVERRIDE is paired with both single-level and mipmapped images in one draw, which is not implemented");
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(!mipmappedImage, "guest sampler with ANISO_OVERRIDE is paired with both single-level and mipmapped images in one draw, which is not implemented");
+    }
+    if (mipmappedImage) return std::nullopt;
     return std::array<std::uint32_t, 4>{words[0], words[1], filters & ~((2u << 20u) | (2u << 22u)), words[3]};
 }
 

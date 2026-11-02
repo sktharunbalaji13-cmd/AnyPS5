@@ -169,6 +169,7 @@ private:
     std::size_t descriptorSpanBytes = 0;
     std::uint64_t rawInvalidations = 0;
     std::uint32_t forceSync = 0;
+    std::uint64_t invalidDescriptorBase = 0;
 };
 
 // The positions, among a dispatch-cache variant's stored words, of the pure flat-SRT leaves a

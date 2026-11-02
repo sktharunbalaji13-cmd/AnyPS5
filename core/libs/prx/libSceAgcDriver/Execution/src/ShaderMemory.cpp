@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
@@ -23,6 +24,13 @@
 
 namespace AgcDriver {
 namespace {
+
+constexpr bool IsDefinedImageFormatWord(std::uint32_t format) {
+    return (format >= 1u && format <= 77u) ||
+           (format >= 128u && format <= 154u) ||
+           (format >= 156u && format <= 182u) ||
+           (format >= 265u && format <= 292u);
+}
 
 struct CaptureProfile {
     std::atomic<std::uint64_t> captures{0};
@@ -403,6 +411,35 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     page.read.Set(index);
     page.recent.Set(index);
     *value = page.words[index];
+    if (DriverDetail::SkipRefusedDraws()) {
+        if (self.invalidDescriptorBase != 0 && (address == self.invalidDescriptorBase || address == self.invalidDescriptorBase + 4)) {
+            *value = 0;
+            return true;
+        }
+        if (self.descriptorSpanBytes == 16u) {
+            std::array<std::uint32_t, 4> descWords{};
+            if (GuestMemory::Accessible(reinterpret_cast<const void*>(address), sizeof(descWords))) {
+                GuestMemory::CopyGuestBytes(descWords.data(), reinterpret_cast<const void*>(address), sizeof(descWords));
+                if ((descWords[3] >> 30u) != 0u) {
+                    self.invalidDescriptorBase = address;
+                    *value = 0;
+                    return true;
+                }
+            }
+        } else if (self.descriptorSpanBytes == 32u) {
+            std::array<std::uint32_t, 8> descWords{};
+            if (GuestMemory::Accessible(reinterpret_cast<const void*>(address), sizeof(descWords))) {
+                GuestMemory::CopyGuestBytes(descWords.data(), reinterpret_cast<const void*>(address), sizeof(descWords));
+                const auto type = (descWords[3] >> 28u) & 0xfu;
+                const auto format = static_cast<std::uint32_t>((descWords[1] >> 20u) & 0x1ffu);
+                if (descWords[0] != 0 && (type < 2u || !IsDefinedImageFormatWord(format))) {
+                    self.invalidDescriptorBase = address;
+                    *value = 0;
+                    return true;
+                }
+            }
+        }
+    }
     return true;
 }
 
@@ -497,6 +534,23 @@ bool ShaderMemory::readWords(void* context, std::uint64_t address, std::uint32_t
             count -= words;
         }
         if (self.rawInvalidations == invalidationsBefore) {
+            if (DriverDetail::SkipRefusedDraws()) {
+                if (startCount == 4u) {
+                    if ((startValues[3] >> 30u) != 0u) {
+                        startValues[0] = 0;
+                        startValues[1] = 0;
+                        startValues[2] = 0;
+                        startValues[3] = 0;
+                    }
+                } else if (startCount == 8u) {
+                    const auto type = (startValues[3] >> 28u) & 0xfu;
+                    const auto format = static_cast<std::uint32_t>((startValues[1] >> 20u) & 0x1ffu);
+                    if (startValues[0] != 0 && (type < 2u || !IsDefinedImageFormatWord(format))) {
+                        startValues[0] = 0;
+                        startValues[1] = 0;
+                    }
+                }
+            }
             return true;
         }
     }
@@ -730,6 +784,7 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(c
 }
 
 std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle* handle, const ShaderRecompiler::PreparedShaderInvocation* invocation) {
+    invalidDescriptorBase = 0;
     // The capture's word and page reads (through `read`) are attributed to it ([hooksync], [guestmem]).
     const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::Capture);
     const bool profile = CaptureProfiled();

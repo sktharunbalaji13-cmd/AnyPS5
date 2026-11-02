@@ -1123,6 +1123,86 @@ struct Recorder::ProgressWatcher {
                 if (counterValue(device, timeline, &value) != VK_SUCCESS) value = target;
                 seen = std::max(target, value);
                 KernelWakeSleepers_nid_no_patch();
+                std::uint64_t tableBase = 0x1100000000ull;
+                if (GuestMemory::Accessible(reinterpret_cast<const void*>(0x1431f7fc8ull), sizeof(std::uint64_t))) {
+                    const auto ptr = *reinterpret_cast<const std::uint64_t*>(0x1431f7fc8ull);
+                    if (ptr != 0) tableBase = ptr;
+                }
+                if (GuestMemory::Accessible(reinterpret_cast<const void*>(tableBase), 0x8000, true)) {
+                    auto* table = reinterpret_cast<volatile std::uint64_t*>(tableBase);
+                    auto updateStream = [&](std::int32_t stream, std::uint64_t target) {
+                        if (stream >= 0 && stream < 1024 && target > 0) {
+                            if (table[stream * 4] < target) {
+                                table[stream * 4] = target;
+                            }
+                        }
+                    };
+
+                    // stream0
+                    const auto* stream0Ptr = reinterpret_cast<const std::int32_t*>(0x143368ba4ull);
+                    const auto* target0Ptr = reinterpret_cast<const std::uint64_t*>(0x143368bb0ull);
+                    if (GuestMemory::Accessible(stream0Ptr, sizeof(std::int32_t)) &&
+                        GuestMemory::Accessible(target0Ptr, sizeof(std::uint64_t))) {
+                        updateStream(*stream0Ptr, *target0Ptr);
+                    }
+
+                    // streamA
+                    const auto* targetAPtr = reinterpret_cast<const std::uint32_t*>(0x141ac7cd0ull);
+                    const auto* streamAPtr = reinterpret_cast<const std::int32_t*>(0x141ac7cd4ull);
+                    if (GuestMemory::Accessible(targetAPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamAPtr, *targetAPtr);
+                    }
+
+                    // streamB
+                    const auto* targetBPtr = reinterpret_cast<const std::uint32_t*>(0x141bb23b0ull);
+                    const auto* streamBPtr = reinterpret_cast<const std::int32_t*>(0x141bb23b4ull);
+                    if (GuestMemory::Accessible(targetBPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamBPtr, *targetBPtr);
+                    }
+
+                    // streamC
+                    const auto* targetCPtr = reinterpret_cast<const std::uint32_t*>(0x141bb2990ull);
+                    const auto* streamCPtr = reinterpret_cast<const std::int32_t*>(0x141bb2994ull);
+                    if (GuestMemory::Accessible(targetCPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamCPtr, *targetCPtr);
+                    }
+
+                    // streamD
+                    const auto* targetDPtr = reinterpret_cast<const std::uint32_t*>(0x1418abcd0ull);
+                    const auto* streamDPtr = reinterpret_cast<const std::int32_t*>(0x1418abcd4ull);
+                    if (GuestMemory::Accessible(targetDPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamDPtr, *targetDPtr);
+                    }
+
+                    // streamE
+                    const auto* targetEPtr = reinterpret_cast<const std::uint32_t*>(0x141ee26f8ull);
+                    const auto* streamEPtr = reinterpret_cast<const std::int32_t*>(0x141ee26fcull);
+                    if (GuestMemory::Accessible(targetEPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamEPtr, *targetEPtr);
+                    }
+
+                    // streamMain
+                    const auto* targetMainPtr = reinterpret_cast<const std::uint32_t*>(0x14189f220ull);
+                    const auto* streamMainPtr = reinterpret_cast<const std::int32_t*>(0x14189f224ull);
+                    if (GuestMemory::Accessible(targetMainPtr, sizeof(std::uint32_t) + sizeof(std::int32_t))) {
+                        updateStream(*streamMainPtr, *targetMainPtr);
+                    }
+
+                    static auto lastReport = std::chrono::steady_clock::now();
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastReport >= std::chrono::seconds(2)) {
+                        lastReport = now;
+                        std::fprintf(stderr, "[gpu] progress seen=%llu s0=%d sA=%d sB=%d sC=%d sD=%d sE=%d sMain=%d\n",
+                                     static_cast<unsigned long long>(seen),
+                                     GuestMemory::Accessible(stream0Ptr, 4) ? *stream0Ptr : -1,
+                                     GuestMemory::Accessible(streamAPtr, 4) ? *streamAPtr : -1,
+                                     GuestMemory::Accessible(streamBPtr, 4) ? *streamBPtr : -1,
+                                     GuestMemory::Accessible(streamCPtr, 4) ? *streamCPtr : -1,
+                                     GuestMemory::Accessible(streamDPtr, 4) ? *streamDPtr : -1,
+                                     GuestMemory::Accessible(streamEPtr, 4) ? *streamEPtr : -1,
+                                     GuestMemory::Accessible(streamMainPtr, 4) ? *streamMainPtr : -1);
+                    }
+                }
             }
         });
     }

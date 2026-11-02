@@ -126,6 +126,7 @@ std::atomic<std::uint64_t> flushedAfterSkip{0}, flushedAfterSkipSameSite{0}, sta
 std::atomic<std::uint64_t> depthCopyTextures{0}, depthCopyRefreshes{0};
 std::atomic<std::uint64_t> refreshesProved{0};
 std::atomic<std::uint64_t> untrackedCompares{0};
+constexpr std::uint64_t GenerationBaselineBytes = 1ull << 20;
 
 struct StorageTraffic {
     AgcDriver::Mutex mutex;
@@ -2456,9 +2457,10 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
     // clear code make every result dead on hardware too. Without a generation (no tracking) a
     // unit's stamps say nothing, so it is stored.
     const auto droppable = [&](std::uint32_t unit) {
-        if (keysChanged && IsDccClear(keys) && !HasWritesSinceFill(unit)) return true;
         if (!blockUnits) return false;
+        if (keysChanged && IsDccClear(keys) && !HasWritesSinceFill(unit)) return true;
         if (compared) return stampedBlocks.at(unit) == GuestMemory::BlockWritten;
+        if (guestBytes >= 16 * 1024 * 1024) return false;
         if (!tracked || layerGeneration[unit] == 0 || unit >= stampedBlocks.size() || stampedBlocks[unit] != GuestMemory::BlockWritten) return false;
         const auto begin = layerBegin(unit);
         const auto bytes = layerBytes(unit);
@@ -2702,8 +2704,6 @@ bool StorageTexture::compareUntracked(std::uint64_t address, std::size_t bytes, 
     }
     return true;
 }
-
-constexpr std::uint64_t GenerationBaselineBytes = 1ull << 20;
 
 bool SingleKeyColorFor(const GuestTextureResource& resource, std::uint64_t guestBytes, std::uint64_t collected, DccSingleProof& proof, VkFormat format, DccKeys keys, VkClearColorValue& clear) {
     if (keys != DccKeys::ClearSingle || !ProvedSingleUniform(resource, guestBytes, collected, proof)) return false;
@@ -6281,7 +6281,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             const bool edge = from != at || to != at + block;
             const auto index = static_cast<std::size_t>((at - spanBegin) / block);
             const bool kept = keptAtUnwatchHolds(from, layer);
-            const bool written = kept || unknown || (changedBlocks[index] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), unitBlockGeneration(layer, at))) && !unchangedSinceBaseline(from, to));
+            const bool written = guestBytes < 16 * 1024 * 1024 && (kept || unknown || (changedBlocks[index] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), unitBlockGeneration(layer, at))) && !unchangedSinceBaseline(from, to)));
             if (written && (!drawn.rect || (tracked && !kept && !unknown && cpuBlocks[index] == 0))) {
                 skippedAny = true;
                 skippedLayer[layer] = true;

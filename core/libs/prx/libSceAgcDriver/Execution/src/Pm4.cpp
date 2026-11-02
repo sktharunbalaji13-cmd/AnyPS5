@@ -1,4 +1,5 @@
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
@@ -548,7 +549,7 @@ bool waitCompares(std::span<const std::uint32_t> packet, bool wide, std::uint64_
         case 0: return true;
         case 1: return masked < reference;
         case 2: return masked <= reference;
-        case 3: return masked == reference;
+        case 3: return masked == reference || (DriverDetail::SkipRefusedDraws() && masked > reference && reference > 1u);
         case 4: return masked != reference;
         case 5: return masked >= reference;
         case 6: return masked > reference;

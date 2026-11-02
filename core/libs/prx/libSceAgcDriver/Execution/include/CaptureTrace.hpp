@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -73,9 +74,10 @@ private:
     void append(std::string line) {
         if (!output.is_open()) return;
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        thread_local const unsigned thread = ++nextThread;
         std::lock_guard lock(mutex);
         if (pending.size() + line.size() + 64 > 16 * 1024 * 1024) throw std::runtime_error("Capture trace queue exceeded 16 MiB");
-        pending += std::to_string(++sequence) + " " + std::to_string(elapsed) + "us " + line + "\n";
+        pending += std::to_string(++sequence) + " " + std::to_string(elapsed) + "us " + line + " t=" + std::to_string(thread) + "\n";
         if (line.starts_with("blit ")) flushRequested = true;
         if (pending.size() >= 65536 || flushRequested) changed.notify_one();
     }
@@ -108,6 +110,7 @@ private:
     std::thread worker;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     unsigned long long sequence = 0;
+    std::atomic<unsigned> nextThread{0};
     bool stopping = false;
     bool flushRequested = false;
 };

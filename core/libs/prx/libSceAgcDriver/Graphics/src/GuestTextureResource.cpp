@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <array>
@@ -136,7 +137,9 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> descri
 
     const auto base40 = (static_cast<std::uint64_t>(words[0]) | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffull;
     auto baseAddress = base40 << 8u;
-    Require(baseAddress != 0, "guest texture descriptor has a null base address");
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(baseAddress != 0, "guest texture descriptor has a null base address");
+    }
 
     const auto minLod = (words[1] >> 8u) & 0xfffu;
     const auto format = (words[1] >> 20u) & 0x1ffu;
@@ -189,10 +192,21 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> descri
             std::fprintf(stderr, "[gpu] texture streaming feedback (LOD warning / mip statistics) is not reported\n");
         }
     }
-    Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
-    Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
-    Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
-    Require(!iterate256 || (typeRaw == 14u && tileModeRaw == 24u && (format == 7u || format == 22u)), "guest texture descriptor ITERATE_256 is implemented only for multisampled Z depth");
+    if (!DriverDetail::SkipRefusedDraws()) {
+        Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
+        Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
+        Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
+        Require(!iterate256 || (typeRaw == 14u && tileModeRaw == 24u && (format == 7u || format == 22u)), "guest texture descriptor ITERATE_256 is implemented only for multisampled Z depth");
+        Require(bcSwizzle <= 5u, "guest texture descriptor uses a reserved BC swizzle");
+        Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
+    } else {
+        if (baseLevel > lastLevel) {
+            lastLevel = baseLevel;
+        }
+    }
+    static_cast<void>(cornerSample);
+    static_cast<void>(prtDefColor);
+    static_cast<void>(arrayPitch);
     static_cast<void>(maxUncompBlkSize);
     static_cast<void>(maxCompBlkSize);
     // Surfaces are always written uncompressed here (render targets and storage images bypass DCC), so
@@ -205,9 +219,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> descri
             std::fprintf(stderr, "[gpu] texture DCC color transform is ignored (word6=0x%08x word7=0x%08x)\n", words[6], words[7]);
         }
     }
-    Require(bcSwizzle <= 5u, "guest texture descriptor uses a reserved BC swizzle");
-
-    Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
 
     const bool fmask = ShaderRecompiler::IsFmaskTextureFormat(static_cast<ShaderRecompiler::IrBufferFormat>(format));
     const auto fmaskLayout = ShaderRecompiler::FmaskLayoutOf(static_cast<ShaderRecompiler::IrBufferFormat>(format));
@@ -244,7 +255,9 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> descri
     if (XorSwizzleMode(tileMode) != 0) {
         pipeBankXor = static_cast<std::uint32_t>(baseAddress & (tileMode == TextureTileMode::kS4KBX || tileMode == TextureTileMode::kD4KBX ? 0xfffu : 0xffffu));
         baseAddress -= pipeBankXor;
+        if (!DriverDetail::SkipRefusedDraws()) {
         Require(baseAddress != 0, "guest texture descriptor has a null base address");
+    }
     }
 
     switch (dimension) {

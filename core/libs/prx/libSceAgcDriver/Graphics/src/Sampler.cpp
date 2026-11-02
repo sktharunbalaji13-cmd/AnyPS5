@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <string>
@@ -7,13 +8,15 @@
 namespace AgcDriver::Graphics {
 
     void Sampler::Validate(const Context& context, const GuestSamplerResource& descriptor) {
-        Require(!descriptor.anisotropyEnable || context.samplerAnisotropy, "guest sampler descriptor requests anisotropic filtering which the device does not support");
-        Require(descriptor.maxAnisotropy <= context.limits.maxSamplerAnisotropy, "guest sampler descriptor requests an anisotropy ratio beyond the device limit");
-        Require(descriptor.lodBias >= -context.limits.maxSamplerLodBias && descriptor.lodBias <= context.limits.maxSamplerLodBias, "guest sampler descriptor requests a LOD bias beyond the device limit");
-        Require(!(descriptor.unnormalizedCoordinates && descriptor.compareEnable), "guest sampler descriptor with unnormalized coordinates enables depth comparison, which is not implemented");
-        if (descriptor.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT) {
-            Require(context.samplerFilterMinmax, "guest sampler descriptor uses a min or max reduction which the device does not support");
-            Require(!descriptor.compareEnable, "guest sampler descriptor combines a min or max reduction with depth comparison, which is not implemented");
+        if (!DriverDetail::SkipRefusedDraws()) {
+            Require(!descriptor.anisotropyEnable || context.samplerAnisotropy, "guest sampler descriptor requests anisotropic filtering which the device does not support");
+            Require(descriptor.maxAnisotropy <= context.limits.maxSamplerAnisotropy, "guest sampler descriptor requests an anisotropy ratio beyond the device limit");
+            Require(descriptor.lodBias >= -context.limits.maxSamplerLodBias && descriptor.lodBias <= context.limits.maxSamplerLodBias, "guest sampler descriptor requests a LOD bias beyond the device limit");
+            Require(!(descriptor.unnormalizedCoordinates && descriptor.compareEnable), "guest sampler descriptor with unnormalized coordinates enables depth comparison, which is not implemented");
+            if (descriptor.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT) {
+                Require(context.samplerFilterMinmax, "guest sampler descriptor uses a min or max reduction which the device does not support");
+                Require(!descriptor.compareEnable, "guest sampler descriptor combines a min or max reduction with depth comparison, which is not implemented");
+            }
         }
     }
 
@@ -83,7 +86,9 @@ namespace AgcDriver::Graphics {
         std::lock_guard lock(mutex);
         ++clock;
         if (const auto found = entries.find(key); found != entries.end()) {
-            Require(forceDegammaPaired || !found->second.sampler->ForcesDegamma(), "guest sampler descriptor forces sRGB decoding which is not implemented");
+            if (!DriverDetail::SkipRefusedDraws()) {
+                Require(forceDegammaPaired || !found->second.sampler->ForcesDegamma(), "guest sampler descriptor forces sRGB decoding which is not implemented");
+            }
             ++hits;
             found->second.lastUse = clock;
             return found->second.sampler;

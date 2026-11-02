@@ -414,6 +414,10 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             char where[96];
             if (dump.empty()) std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
             else std::snprintf(where, sizeof(where), "compute shader 0x%llx (%s): ", static_cast<unsigned long long>(address), dump.c_str());
+            if (SkipRefusedDraws()) {
+                reportSkip("dispatch", where + reason);
+                return;
+            }
             throw std::runtime_error(where + reason);
         }
         recompileMs += phaseTiming.Elapsed();
