@@ -1056,7 +1056,10 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         if (traceTextures) {
             std::size_t nonzero = 0;
             for (std::size_t i = 0; i < entry.bytes.size(); i += 64) nonzero += entry.bytes[i] != std::byte{0};
-            std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d: %zu of %zu sampled bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), nonzero, entry.bytes.size() / 64);
+            const auto* guest = reinterpret_cast<const std::byte*>(static_cast<std::uintptr_t>(address));
+            std::size_t guestNonzero = 0;
+            for (std::size_t i = 0; i < bytes && guest != nullptr; i += 64) guestNonzero += guest[i] != std::byte{0};
+            std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d keys %s: %zu of %zu sampled bytes nonzero, %zu of %zu guest bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), DccKeysName(*keys), nonzero, entry.bytes.size() / 64, guestNonzero, bytes / 64);
         }
         entry.texture = createTexture(*context.detiler, resource, components, entry.bytes, depthCompare);
         entry.accounted = entry.texture->AllocationBytes();

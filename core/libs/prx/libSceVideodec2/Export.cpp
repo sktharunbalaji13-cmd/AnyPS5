@@ -455,6 +455,23 @@ void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, Out
     if (!WriteNv12(decoder, *picture, static_cast<std::uint8_t*>(frame->frameBuffer), frame->frameBufferSize)) throw std::runtime_error("Videodec2: NV12 conversion failed");
     timestamps.bitDepthMinus8 = decoder.sampleBytes == 2 ? 2 : 0;
     const auto pitch = PitchBytes(decoder.width, decoder.sampleBytes);
+    if (Trace()) {
+        static std::atomic<int> emitted{0};
+        const auto count = emitted.fetch_add(1, std::memory_order_relaxed);
+        if (count >= 20 && count < 26) {
+            const auto* luma = static_cast<const std::uint8_t*>(frame->frameBuffer);
+            char name[64];
+            std::snprintf(name, sizeof(name), "decoded_%d.pgm", count);
+            if (std::FILE* file = std::fopen(name, "wb")) {
+                std::fprintf(file, "P5\n%u %u\n255\n", decoder.width, decoder.height);
+                for (std::uint32_t row = 0; row < decoder.height; ++row) std::fwrite(luma + static_cast<std::size_t>(row) * pitch, 1, decoder.width, file);
+                std::fclose(file);
+            }
+            std::size_t nonzero = 0;
+            for (std::size_t i = 0; i < 65536; i += 64) nonzero += luma[i] != 0;
+            std::fprintf(stderr, "[videodec2] emit %d %ux%u pitch %zu: %zu of 1024 luma samples nonzero\n", count, decoder.width, decoder.height, pitch, nonzero);
+        }
+    }
     frame->isAccepted = true;
     output->isValid = true;
     output->isErrorFrame = false;

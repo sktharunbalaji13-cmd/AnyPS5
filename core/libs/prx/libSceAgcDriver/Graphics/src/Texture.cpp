@@ -4676,7 +4676,7 @@ void StorageTexture::FlushDumpSelected(const char* reason) {
             std::lock_guard lock(live.mutex);
             for (auto* texture : live.textures) {
                 if (selected.size() + captured.size() >= 8) break;
-                if (!StorageDumpSelects(texture->descriptor) || texture->sliceLinearBytes * texture->arrayLayers > (8u << 20u)) continue;
+                if (!StorageDumpSelects(texture->descriptor) || texture->sliceLinearBytes * texture->arrayLayers > (64u << 20u)) continue;
                 if (std::find(captured.begin(), captured.end(), texture->descriptor.baseAddress) != captured.end()) continue;
                 if (auto alive = texture->weak_from_this().lock()) selected.push_back(std::move(alive));
             }

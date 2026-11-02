@@ -4018,7 +4018,9 @@ double VulkanDevice::RetirePresents(std::size_t keepInFlight) {
             timing.Mark("poll");
         } else {
             const auto start = std::chrono::steady_clock::now();
+            CaptureTrace::Log("present-retire-wait slot=%zu", static_cast<std::size_t>(&slot - slots.data()));
             state->WaitPresentFence(slot.fence);
+            CaptureTrace::Log("present-retire-done slot=%zu", static_cast<std::size_t>(&slot - slots.data()));
             waitedMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             timing.Mark("wait");
         }
@@ -4051,6 +4053,7 @@ void VulkanDevice::QueuePresent() {
     std::unique_lock presentQueueLock(state->presentQueueMutex, std::defer_lock);
     if (state->presentQueue != VK_NULL_HANDLE) presentQueueLock.lock();
     const auto presented = state->DeviceFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(state->presentQueue != VK_NULL_HANDLE ? state->presentQueue : state->queue, &present);
+    CaptureTrace::Log("present-queued index=%u result=%d", index, static_cast<int>(presented));
     if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) state->extent = {0, 0};
     else check(presented, "vkQueuePresentKHR");
     timing.Mark("queue_present");

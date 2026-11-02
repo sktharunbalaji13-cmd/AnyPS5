@@ -2684,11 +2684,7 @@ void growResident(ImageMirror& mirror, const GuestRuns& runs) {
                 counted = true;
                 break;
             }
-            if (attempt != 0) {
-                static std::atomic<int> reported{0};
-                if (reported.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[gpu] %s; keeping the bound blocks and copying the rest\n", heapMirrorError(mirror.base, mirror.reserved, state.heapBytes, "past the budget").c_str());
-                return;
-            }
+            if (attempt != 0) throw std::runtime_error(heapMirrorError(mirror.base, mirror.reserved, state.heapBytes, "past the budget"));
         }
         sweepMirrors(need, mirror.base);
     }
@@ -2917,7 +2913,12 @@ void bindHeapBlocks(std::span<const RefreshBlock> blocks) {
     }
     for (auto& [mirror, runs] : wanted) {
         std::sort(runs.begin(), runs.end());
-        growResident(*mirror, runs);
+        try {
+            growResident(*mirror, runs);
+        } catch (const std::runtime_error& error) {
+            static std::atomic<int> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[gpu] %s; keeping the bound blocks and copying the rest\n", error.what());
+        }
     }
 }
 
