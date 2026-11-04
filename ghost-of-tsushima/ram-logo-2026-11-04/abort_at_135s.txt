@@ -1,0 +1,1 @@
+[gpu] driver failure: compute shader 0x2000111500: AGC graphics: heap mirror of 0x1200000000+0x125800000: vkAllocateMemory of a heap mirror slab: allocation=16777216 memoryType=1 reclaimed=0 released=4194304 initialResult=-2 attempts=2; heap 0 7941/7188 MiB; heap 1 4185/7180 MiB: Vulkan result -2; heap mirrors hold 1051 MiB of 24576 MiB (APS5_HEAP_MIRROR_MIB)

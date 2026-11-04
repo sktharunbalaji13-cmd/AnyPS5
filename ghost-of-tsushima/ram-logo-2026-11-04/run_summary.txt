@@ -1,0 +1,9 @@
+Before start: 8911 MB free of 15654 MB; kernel nonpaged 732 MB, paged 479 MB
+Frame counter (time s -> frames presented): 10.1:10, 20.1:98, 30.1:113, 40.1:127, 50:265, 60.1:602, 70.1:633, 80:655, 90:673, 100.1:685, 110.1:703
+Freezes of 4 s or more (no new frames): 14-22.1 s (8.1 s), 90-94.1 s (4.1 s)
+Audio audible (first stretch is the intro soundtrack): 9-22 s
+Game memory: private 39 -> 24292 MB; lowest free RAM during run 4 MB
+Screenshots: 53 taken, 7 with visible content, 0 mostly blue
+Content frames at: 24 s, 26 s, 28 s, 30 s, 32 s, 34 s, 110 s
+Contact sheet: C:\Users\k.tharun balaji\OneDrive\Desktop\GoT_logo_result_logo_20261104_221149.png
+Full logs: C:\anyps5\Game logs\M28_2026-10-22_17-57-05\launch\logo_20261104_221149

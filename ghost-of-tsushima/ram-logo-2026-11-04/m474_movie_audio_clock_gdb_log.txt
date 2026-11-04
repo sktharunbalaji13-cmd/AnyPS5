@@ -1,0 +1,26 @@
+attached; logging for 95 s
+4.75 post #1 edx(flags)=0 rdi=b36d509 rsi=4
+dump audio 1000aae140: 1974f48 bedfad9600000001 0 0 0 1000aa18c0 0 1974f48 bedfad9600000001 0 0 0 1000aa1988 0 1000aae1e8 0 0 0 0 0 0 1000aae220 0 0 0 0 0 0 1000aae258 0 0 0
+dump audio 1000aae140 vtable(elf)=1574f48
+dump inner 1000aa18c0: 1000000001 9e55a2e3d6202e49 ffffc7c000000008 ffffc7c0ffffc7c0 af7ffffc7c0 ffffc7c0 ffffffffffffffff 0 3ba1c3c 10002d4260 0 0 0 bf80000000000000 5af45420 ffffffff00000000 100010000000000 0 1000a3a6c0 0 0 0 d00000000 0 0 1000000001 3a542db9411381b4 ffffc7c000000008 ffffc7c0ffffc7c0 af7ffffc7c0 ffffc7c0 ffffffffffffffff
+5.61 select #1 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=0.0 pos6c=-1.0 start=0.0 idx=0 cap=10 released=0 written=10 stop=0 b64=1 b65=1
+5.66 post #2 edx(flags)=100001 rdi=64aee9d rsi=6
+5.66 posted #1 eax(playingid)=2
+5.67 posupdate #1 inner=1000aa1988 pid=2 stopev=0 pos68=0.0 pos6c=-1.0 state=1 track=1 b86=0 t14=4294952896 t18=4294952896 t1c=4294952896 t20=4294952896 t24=2807
+5.67 post #3 edx(flags)=100001 rdi=5af45420 rsi=5
+5.68 posted #2 eax(playingid)=3
+5.68 posupdate #2 inner=1000aa18c0 pid=3 stopev=0 pos68=0.0 pos6c=-1.0 state=1 track=1 b86=0 t14=4294952896 t18=4294952896 t1c=4294952896 t20=4294952896 t24=2807
+5.68 release #1 shown=1 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=0.0 pos6c=-1.0 start=0.0 idx=1 cap=10 released=0 written=10 stop=0 b64=1 b65=1
+5.69 select #2 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=0.0 pos6c=-1.0 start=0.0 idx=1 cap=10 released=1 written=11 stop=0 b64=1 b65=1
+22.97 posupdate #3 inner=1000aa1988 pid=2 stopev=0 pos68=0.0 pos6c=-1.0 state=1 track=1 b86=0 t14=4294952896 t18=4294952896 t1c=4294952896 t20=4294952896 t24=2807
+23.01 posupdate #4 inner=1000aa18c0 pid=3 stopev=0 pos68=0.0 pos6c=-1.0 state=1 track=1 b86=0 t14=4294952896 t18=4294952896 t1c=4294952896 t20=4294952896 t24=2807
+27.14 callback #1 type(edi)=1 rsi=fdaf87fb68 rdx=1
+27.40 callback #2 type(edi)=1 rsi=fdaf87fb68 rdx=1
+40.22 release #2 shown=1 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=17.006 pos6c=-1.0 start=0.0 idx=1 cap=10 released=1 written=11 stop=0 b64=1 b65=1
+40.31 select #3 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=17.006 pos6c=-1.0 start=0.0 idx=1 cap=10 released=1 written=11 stop=0 b64=1 b65=1
+57.12 release #3 shown=10 movie=100a2588a0 state=4 pause=0 audio=0x1000aae140 pos68=17.006 pos6c=-1.0 start=0.0 idx=10 cap=10 released=1 written=11 stop=0 b64=1 b65=1
+57.16 stop-call #1 rdi=100a2588a0 rsi=0 rets=+0:8b7874 +20:eaa940 +90:eab672 +160:8c7b88
+57.17 post #4 edx(flags)=0 rdi=f434dda8 rsi=4
+72.59 post #5 edx(flags)=0 rdi=18f116cd rsi=4
+73.04 post #6 edx(flags)=1 rdi=eab4853f rsi=7
+counts {'post': 6, 'select': 3, 'posted': 2, 'posupdate': 4, 'release': 3, 'callback': 2, 'stop-call': 1}
