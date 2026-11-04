@@ -6266,6 +6266,7 @@ std::shared_ptr<ShaderResources::DrawUse> ShaderResources::BeginDrawUse(Recorder
 
 void ShaderResources::CompleteDrawUse(const DrawUse& use) const {
     if (bda != nullptr) bda->CheckUse(use.record.get());
+    if (bda != nullptr && GuestBufferMemory::MirrorBdaWrites()) guestMemory.WriteBackRuntimeWrites(bda->TakeWrittenRanges());
 }
 
 void ShaderResources::BindDrawUse(VkCommandBuffer commands, VkPipelineLayout layout, const DrawUse* use) const {
@@ -6391,6 +6392,7 @@ void ShaderResources::MarkGpuWrites(Recorder& recorder) {
 
 void ShaderResources::CheckFaults() const {
     if (bda) bda->CheckFault();
+    if (bda && GuestBufferMemory::MirrorBdaWrites()) guestMemory.WriteBackRuntimeWrites(bda->TakeWrittenRanges());
 }
 
 void ShaderResources::WriteBackBuffers() {
@@ -6403,6 +6405,7 @@ void ShaderResources::WriteBackBuffers() {
         }
     }
     if (!SkipWriteBack()) guestMemory.WriteBack();
+    if (bda && GuestBufferMemory::MirrorBdaWrites()) guestMemory.WriteBackRuntimeWrites(bda->TakeWrittenRanges());
     if (unaligned) std::rethrow_exception(unaligned);
 }
 

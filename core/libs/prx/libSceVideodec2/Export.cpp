@@ -550,7 +550,7 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
         ClearOutput(decoder, frame, output);
         return input->auData ? Videodec2ErrorAccessUnitSize : Videodec2ErrorAccessUnitPointer;
     }
-    if (Trace() && decoder.decoded < 3) std::fprintf(stderr, "[videodec2] Decode input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(input->thisSize), static_cast<unsigned long long>(frame ? frame->thisSize : 0), static_cast<unsigned long long>(output->thisSize), static_cast<unsigned long long>(input->auSize), static_cast<unsigned long long>(input->ptsData), decoder.width, decoder.height, frame ? frame->frameBuffer : nullptr, static_cast<unsigned long long>(frame ? frame->frameBufferSize : 0));
+    if (Trace() && (decoder.decoded < 3 || decoder.decoded % 30 == 0)) std::fprintf(stderr, "[videodec2] Decode n=%llu input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(decoder.decoded), static_cast<unsigned long long>(input->thisSize), static_cast<unsigned long long>(frame ? frame->thisSize : 0), static_cast<unsigned long long>(output->thisSize), static_cast<unsigned long long>(input->auSize), static_cast<unsigned long long>(input->ptsData), decoder.width, decoder.height, frame ? frame->frameBuffer : nullptr, static_cast<unsigned long long>(frame ? frame->frameBufferSize : 0));
     ++decoder.decoded;
     const Picture picture{input->ptsData, input->dtsData, input->attachedData};
     if (decoder.flushing) {

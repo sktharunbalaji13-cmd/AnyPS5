@@ -463,6 +463,10 @@ void BdaResources::CheckFault() const {
     checkFault(*this);
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> BdaResources::TakeWrittenRanges() const {
+    return std::exchange(writtenRanges, {});
+}
+
 void BdaResources::CheckUse(const BdaResources* record) const {
     const auto& checked = record != nullptr ? *record : *this;
     if (checked.faultChunk == nullptr) return;
@@ -588,6 +592,7 @@ void BdaResources::markWrittenPages(const BdaResources& record) const {
             }
         }
         GuestMemory::MarkPossiblyWritten(begin, bytes);
+        if (GuestBufferMemory::MirrorBdaWrites()) writtenRanges.emplace_back(begin, end);
     }), "invalid BDA written-page record");
     for (std::uint32_t claim = 0; claim < count; ++claim) {
         const auto slot = words[Abi::WrittenListWord + claim];

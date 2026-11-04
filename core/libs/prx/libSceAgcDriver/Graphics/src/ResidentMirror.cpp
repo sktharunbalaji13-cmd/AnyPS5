@@ -14,6 +14,9 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -190,6 +193,26 @@ struct Candidate {
     bool readable = true;
 };
 
+#ifdef _WIN32
+bool unwrittenZero() {
+    static const bool enabled = std::getenv("APS5_WIN_UNWRITTEN_ZERO") != nullptr;
+    return enabled;
+}
+
+void noteUnwrittenSkip(std::uint64_t bytes, const std::vector<std::pair<std::uint64_t, std::uint64_t>>& written) {
+    static std::atomic<std::uint64_t> asked{0};
+    static std::atomic<std::uint64_t> read{0};
+    static std::atomic<std::int64_t> lastReport{0};
+    std::uint64_t kept = 0;
+    for (const auto& [first, last] : written) kept += last - first;
+    const auto totalAsked = asked.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+    const auto totalRead = read.fetch_add(kept, std::memory_order_relaxed) + kept;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto last = lastReport.load(std::memory_order_relaxed);
+    if (now - last >= 10 && lastReport.compare_exchange_strong(last, now)) std::fprintf(stderr, "[zero-scan] unwritten-page skip: %.1f MiB asked, %.1f MiB possibly written and read\n", totalAsked / 1048576.0, totalRead / 1048576.0);
+}
+#endif
+
 bool allZero(std::uint64_t begin, std::uint64_t end) {
     const auto* at = reinterpret_cast<const unsigned char*>(begin);
     const auto* stop = reinterpret_cast<const unsigned char*>(end);
@@ -288,7 +311,13 @@ void populatedPages(std::vector<Candidate>& maybe, const Mapping& mapping) {
 std::vector<Candidate> possiblyNonzero(std::uint64_t begin, std::uint64_t end) {
     std::vector<Candidate> maybe;
 #ifdef _WIN32
-    maybe.push_back({begin, end, true});
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> written;
+    if (unwrittenZero() && GuestMemory::PossiblyWrittenRuns(begin, static_cast<std::size_t>(end - begin), written)) {
+        for (const auto& [first, last] : written) maybe.push_back({first, last, true});
+        noteUnwrittenSkip(end - begin, written);
+    } else {
+        maybe.push_back({begin, end, true});
+    }
 #else
     for (const auto& mapping : mappings(begin, end)) {
         int file = -1;
@@ -314,6 +343,18 @@ std::vector<Candidate> possiblyNonzero(std::uint64_t begin, std::uint64_t end) {
 }
 
 bool GuestBytesZero(std::uint64_t begin, std::uint64_t end) {
+#ifdef _WIN32
+    if (begin < end && unwrittenZero()) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> written;
+        if (GuestMemory::PossiblyWrittenRuns(begin, static_cast<std::size_t>(end - begin), written)) {
+            noteUnwrittenSkip(end - begin, written);
+            for (const auto& [first, last] : written) {
+                if (!allZero(first, last)) return false;
+            }
+            return true;
+        }
+    }
+#endif
     return allZero(begin, end);
 }
 

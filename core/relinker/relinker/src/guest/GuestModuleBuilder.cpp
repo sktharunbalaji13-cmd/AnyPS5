@@ -9,6 +9,7 @@
 #include <io/BufferUtils.hpp>
 #include <nid/NidCompute.hpp>
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <map>
@@ -321,7 +322,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     };
     for (const auto& name : neededNames) {
         const auto found = findGuest(name);
-        if (found != guestNames.end() && (!windows || standardDirectory(found->second))) require(found->second);
+        if (found != guestNames.end() && (!windows || standardDirectory(found->second) || std::getenv("APS5_RELINK_REQUIRE_NEEDED") != nullptr)) require(found->second);
     }
     for (const auto provider : executableProviders) require(provider);
     for (std::size_t index = 0; index < images.size(); ++index) {

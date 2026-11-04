@@ -114,6 +114,7 @@ struct ImageMirror {
     bool listed = false;
     // Writable ranges only: the guest bytes the mirror holds, compared on refresh and at write-back.
     std::vector<std::byte> shadow;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> bdaLearned;
     // Identity for the life of this mirror (see ImageMirrorSerial); the top bit keeps mirror serials
     // apart from host import serials.
     std::uint64_t serial = 0;
@@ -3116,10 +3117,52 @@ void appendChangedBlocks(std::span<ImageMirror* const> mirrors, std::uint64_t ge
     for (auto* const pointer : mirrors) {
         auto& mirror = *pointer;
         changed.assign(mirror.generations.size(), 0);
-        GuestMemory::ChangedBlocks(mirror.base, static_cast<std::size_t>(mirror.bytes), mirror.generations, changed);
+        thread_local std::vector<std::uint8_t> cpuChanged;
+        cpuChanged.assign(mirror.generations.size(), 0);
+        const bool tracked = GuestMemory::ChangedBlocks(mirror.base, static_cast<std::size_t>(mirror.bytes), mirror.generations, changed, cpuChanged);
+        {
+            static std::atomic<std::uint64_t> cpuWritten{0}, otherWritten{0};
+            static std::mutex topMutex;
+            static std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> perMirror;
+            std::uint64_t cpu = 0, other = 0;
+            for (std::size_t at = 0; at < changed.size(); ++at) {
+                if (changed[at] == 0 || at >= mirror.generations.size() || mirror.generations[at] == 0) continue;
+                if (cpuChanged[at] != 0) ++cpu;
+                else ++other;
+            }
+            cpuWritten += cpu;
+            otherWritten += other;
+            static auto lastTop = std::chrono::steady_clock::now();
+            std::lock_guard lock(topMutex);
+            auto& entry = perMirror[mirror.base];
+            entry.first += cpu;
+            entry.second += other;
+            if (std::chrono::steady_clock::now() - lastTop > std::chrono::seconds(10)) {
+                lastTop = std::chrono::steady_clock::now();
+                std::vector<std::pair<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>>> top(perMirror.begin(), perMirror.end());
+                std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second.first + a.second.second > b.second.first + b.second.second; });
+                std::fprintf(stderr, "[mirror-refresh] written blocks by stamp: cpu %llu, other (marked) %llu; top mirrors:", static_cast<unsigned long long>(cpuWritten.load()), static_cast<unsigned long long>(otherWritten.load()));
+                for (std::size_t index = 0; index < std::min<std::size_t>(6, top.size()); ++index) std::fprintf(stderr, " 0x%llx cpu=%llu other=%llu;", static_cast<unsigned long long>(top[index].first), static_cast<unsigned long long>(top[index].second.first), static_cast<unsigned long long>(top[index].second.second));
+                std::fprintf(stderr, "\n");
+            }
+        }
         const auto aligned = mirror.base / block * block;
         const auto end = mirror.base + mirror.bytes;
         bool refilled = false;
+        static std::atomic<std::uint64_t> untracked{0}, never{0}, written{0}, calls{0};
+        static auto lastReport = std::chrono::steady_clock::now();
+        ++calls;
+        for (std::size_t at = 0; at < changed.size(); ++at) {
+            if (changed[at] != 0) {
+                if (!tracked) ++untracked;
+                else if (at < mirror.generations.size() && mirror.generations[at] == 0) ++never;
+                else ++written;
+            }
+        }
+        if (std::chrono::steady_clock::now() - lastReport > std::chrono::seconds(5)) {
+            lastReport = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "[mirror-refresh] calls %llu, changed blocks: untracked %llu, never refreshed %llu, written %llu\n", static_cast<unsigned long long>(calls.load()), static_cast<unsigned long long>(untracked.load()), static_cast<unsigned long long>(never.load()), static_cast<unsigned long long>(written.load()));
+        }
         for (std::size_t at = 0; at < changed.size(); ++at) {
             if (changed[at] == 0) continue;
             const auto from = std::max(mirror.base, aligned + at * block);
@@ -3160,6 +3203,31 @@ void refreshHeapMirrors(std::vector<ImageMirror*>& mirrors, std::vector<RefreshB
         appendHeapRun(std::span<ImageMirror* const>(mirrors).subspan(first, last - first), generation, blocks);
         first = last;
     }
+}
+
+std::mutex& bdaLearnedMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+void learnBdaWrite(ImageMirror& mirror, std::uint64_t begin, std::uint64_t end) {
+    constexpr std::uint64_t window = 65536;
+    constexpr std::uint64_t limit = 32ull << 20u;
+    begin = begin / window * window;
+    end = (end + window - 1) / window * window;
+    std::lock_guard lock(bdaLearnedMutex());
+    auto& learned = mirror.bdaLearned;
+    learned.emplace_back(begin, end);
+    std::sort(learned.begin(), learned.end());
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+    for (const auto& range : learned) {
+        if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
+        else merged.push_back(range);
+    }
+    std::uint64_t total = 0;
+    for (const auto& [first, last] : merged) total += last - first;
+    if (total <= limit) learned = std::move(merged);
+    else learned.pop_back();
 }
 
 bool sparseMirrorsEnabled() {
@@ -4916,6 +4984,21 @@ void GuestBufferMemory::AcquireRegistered() {
                     coveredEnd = entry->base + entry->bytes;
                 }
             }
+            if (importable && overBudget && range->writable && entry == nullptr && pieces.empty() && std::getenv("APS5_WRITABLE_IMPORT_EVICTS") != nullptr) {
+                auto& state = Imports();
+                std::lock_guard lock(state.mutex);
+                {
+                    const MirrorsYield yield(state, state.buildFloor);
+                    entry = importAllocation(context, state, range->address, lease, ImportRequester::Build, 0, true);
+                }
+                if (entry != nullptr) {
+                    covering = entry;
+                    coveredBegin = entry->base;
+                    coveredEnd = entry->base + entry->bytes;
+                    static std::atomic<int> reported{0};
+                    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) std::fprintf(stderr, "[gpu] host import budget: writable 0x%llx+0x%llx imported in place by evicting idle imports\n", static_cast<unsigned long long>(range->address), static_cast<unsigned long long>(range->bytes));
+                }
+            }
             if (importable && mirrorsEnabled() && entry == nullptr && pieces.empty()) {
                 auto& state = Imports();
                 std::lock_guard lock(state.mutex);
@@ -5368,6 +5451,13 @@ std::shared_ptr<const void> GuestBufferMemory::ReleaseSpace() {
     spaceHeldThrough = 0;
     spaceHeldBy = 0;
     releasedSpace = space;
+    if (MirrorBdaWrites()) {
+        releasedMirrors.clear();
+        for (const auto& region : space->base) {
+            if (region.mirror == nullptr || !region.writable || !region.mirror->writable || region.sparse || region.mirror->sparse) continue;
+            releasedMirrors.push_back({region.begin, std::min(region.end, servedEnd(region)), region.mirror});
+        }
+    }
     return std::move(space);
 }
 
@@ -6623,6 +6713,35 @@ void GuestBufferMemory::RecordCopyBacks(Recorder& recorder) {
             copiedBytes += to - from;
         }
     }
+    if (MirrorBdaWrites()) {
+        runtimeReadbacks.clear();
+        const auto learnedFor = [&](const Region& region) {
+            if (region.mirror == nullptr || !region.writable || !region.mirror->writable || !region.mirror->heap || region.mirror->resident == nullptr || region.sparse || region.mirror->sparse) return;
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> learned;
+            {
+                std::lock_guard lock(bdaLearnedMutex());
+                learned = region.mirror->bdaLearned;
+            }
+            const auto served = std::min(region.end, servedEnd(region));
+            for (const auto& [first, last] : learned) {
+                const auto from = std::max(first, region.begin);
+                const auto to = std::min(last, served);
+                if (from >= to) continue;
+                if (!recording) {
+                    commands = recorder.Commands();
+                    timing = recorder.BeginGpuTiming(StagingCopyBackKey);
+                    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                    Recorder::CountBarriers(Recorder::CommandClass::StagingOut);
+                    recording = true;
+                }
+                runtimeReadbacks.push_back({{from, to}, region.mirror->resident->RecordReadback(commands, from, to - from)});
+                recorder.Keep(runtimeReadbacks.back().second);
+                copiedBytes += to - from;
+            }
+        };
+        for (const auto& region : regions) learnedFor(region);
+        if (space != nullptr) for (const auto& region : space->base) learnedFor(region);
+    }
     for (auto& region : regions) {
         if (!region.gpuCopy || region.copiedBack) continue;
         for (const auto& [begin, end] : merged) {
@@ -6738,8 +6857,10 @@ ShaderRecompiler::BdaAbi::Range GuestBufferMemory::addressRange(const Region& re
     Require(region.buffer != nullptr || region.direct != nullptr || region.mirror != nullptr, "incomplete guest GPU upload");
     const auto address = region.direct != nullptr ? region.direct->address + (region.begin - region.direct->base) : region.mirror != nullptr ? mirrorAddress(*region.mirror) + (region.begin - region.mirror->base) : region.buffer->DeviceAddress();
     Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
-    const auto permissions = ShaderRecompiler::BdaAbi::Read | (region.direct != nullptr && region.writable ? ShaderRecompiler::BdaAbi::Write : 0u);
-    return {region.begin, region.direct != nullptr ? inPlaceEnd(region) : servedEnd(region), address, permissions, 0};
+    const auto end = region.direct != nullptr ? inPlaceEnd(region) : servedEnd(region);
+    const bool mirrorWrite = MirrorBdaWrites() && region.mirror != nullptr && region.writable && region.mirror->writable && !region.sparse && !region.mirror->sparse && end <= ShaderRecompiler::BdaAbi::WrittenAddressLimit;
+    const auto permissions = ShaderRecompiler::BdaAbi::Read | ((region.direct != nullptr && region.writable) || mirrorWrite ? ShaderRecompiler::BdaAbi::Write : 0u);
+    return {region.begin, end, address, permissions, 0};
 }
 
 std::uint64_t GuestBufferMemory::servedEnd(const Region& region) {
@@ -6921,7 +7042,84 @@ bool GuestBufferMemory::HasCopiedWrites() const {
         if (region.mirror != nullptr && !region.mirror->writable) continue;
         return true;
     }
+    if (MirrorBdaWrites()) {
+        const auto bdaWritable = [](const Region& region) { return region.mirror != nullptr && region.writable && region.mirror->writable && !region.sparse && !region.mirror->sparse; };
+        if (std::any_of(regions.begin(), regions.end(), bdaWritable)) return true;
+        if (space != nullptr && std::any_of(space->base.begin(), space->base.end(), bdaWritable)) return true;
+    }
     return false;
+}
+
+bool GuestBufferMemory::MirrorBdaWrites() {
+    static const bool enabled = std::getenv("APS5_MIRROR_BDA_WRITES") != nullptr;
+    return enabled;
+}
+
+void GuestBufferMemory::WriteBackRuntimeWrites(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+    static std::atomic<std::uint64_t> stored{0};
+    static std::atomic<std::uint64_t> storedBytes{0};
+    static std::atomic<std::uint64_t> unmirrored{0};
+    static std::atomic<std::uint64_t> missed{0};
+    struct Served {
+        std::uint64_t begin;
+        std::uint64_t end;
+        ImageMirror* mirror;
+    };
+    const auto lookup = [&](std::uint64_t address) -> std::optional<Served> {
+        if (const auto* found = owner(address, address + 1); found != nullptr && found->begin <= address && address < found->end) {
+            const auto end = found->mirror != nullptr ? std::min(found->end, servedEnd(*found)) : found->end;
+            const bool usable = found->mirror != nullptr && found->writable && found->mirror->writable && !found->sparse && !found->mirror->sparse;
+            return Served{found->begin, end, usable ? found->mirror.get() : nullptr};
+        }
+        const auto next = std::upper_bound(releasedMirrors.begin(), releasedMirrors.end(), address, [](std::uint64_t value, const ReleasedMirror& entry) { return value < entry.begin; });
+        if (next == releasedMirrors.begin()) return std::nullopt;
+        const auto& entry = *std::prev(next);
+        if (address >= entry.end) return std::nullopt;
+        return Served{entry.begin, entry.end, entry.mirror.get()};
+    };
+    for (const auto& [begin, end] : ranges) {
+        for (auto cursor = begin; cursor < end;) {
+            const auto served = lookup(cursor);
+            if (!served || served->mirror == nullptr) {
+                const auto skip = served ? std::min(end, served->end) : end;
+                unmirrored.fetch_add(skip - cursor, std::memory_order_relaxed);
+                cursor = skip > cursor ? skip : end;
+                continue;
+            }
+            const auto to = std::min(end, served->end);
+            if (to <= cursor) break;
+            auto& mirror = *served->mirror;
+            const auto offset = static_cast<std::size_t>(cursor - mirror.base);
+            const auto length = static_cast<std::size_t>(to - cursor);
+            if (mirror.heap) {
+                std::vector<std::byte> current(length);
+                if (mirror.resident != nullptr) {
+                    const auto readback = std::find_if(runtimeReadbacks.begin(), runtimeReadbacks.end(), [&](const auto& entry) { return entry.first.first <= cursor && to <= entry.first.second; });
+                    if (readback == runtimeReadbacks.end()) {
+                        learnBdaWrite(mirror, cursor, to);
+                        const auto lost = missed.fetch_add(length, std::memory_order_relaxed) + length;
+                        static std::atomic<std::uint64_t> misses{0};
+                        if (const auto miss = misses.fetch_add(1, std::memory_order_relaxed) + 1; miss <= 8 || miss % 1024 == 0) std::fprintf(stderr, "[gpu] mirror BDA write-back: 0x%llx+0x%zx missed (no recorded readback yet; learned), %llu misses, %.1f MiB\n", static_cast<unsigned long long>(cursor), length, static_cast<unsigned long long>(miss), lost / 1048576.0);
+                        cursor = to;
+                        continue;
+                    }
+                    std::memcpy(current.data(), readback->second->Bytes().data() + (cursor - readback->first.first), length);
+                    mirror.resident->Store(cursor, current);
+                } else {
+                    std::memcpy(current.data(), mirror.buffer->Bytes().data() + offset, length);
+                }
+                GuestMemory::Write(cursor, current);
+            } else {
+                const auto current = mirror.buffer->Bytes().subspan(offset, length);
+                GuestMemory::WriteChanged(cursor, current, std::span<const std::byte>(mirror.shadow).subspan(offset, length));
+                std::memcpy(mirror.shadow.data() + offset, current.data(), length);
+            }
+            const auto count = stored.fetch_add(1, std::memory_order_relaxed) + 1;
+            const auto total = storedBytes.fetch_add(length, std::memory_order_relaxed) + length;
+            if (count <= 8 || count % 1024 == 0) std::fprintf(stderr, "[gpu] mirror BDA write-back: 0x%llx+0x%zx (%s mirror), %llu stores, %.1f MiB so far; %.1f MiB written in place or unowned, %.1f MiB missed and learned\n", static_cast<unsigned long long>(cursor), length, mirror.heap ? "heap" : "image", static_cast<unsigned long long>(count), total / 1048576.0, unmirrored.load(std::memory_order_relaxed) / 1048576.0, missed.load(std::memory_order_relaxed) / 1048576.0);
+            cursor = to;
+        }
+    }
 }
 
 bool GuestBufferMemory::CopiedWritesOverlap(std::uint64_t address, std::size_t bytes) const {
@@ -7027,6 +7225,7 @@ void GuestBufferMemory::releaseHeapReferences() noexcept {
     for (auto& reference : heapReferences) ReferenceStorage::Shared().Return(std::move(reference.second));
     heapReferences.clear();
     heapReadbacks.clear();
+    runtimeReadbacks.clear();
 }
 
 void GuestBufferMemory::takeHeapReferences() {

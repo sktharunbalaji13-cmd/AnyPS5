@@ -2456,6 +2456,26 @@ bool WrittenSince(std::uint64_t address, std::size_t bytes, std::uint64_t genera
     return false;
 }
 
+bool PossiblyWrittenRuns(std::uint64_t address, std::size_t bytes, std::vector<std::pair<std::uint64_t, std::uint64_t>>& runs) {
+    runs.clear();
+    if (bytes == 0) return true;
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    if (collectWrites(address, bytes, false) == 0) return false;
+    auto& tracker = Tracker();
+    const auto lock = lockTracker(tracker);
+    tracker.initialize();
+    if (!tracker.watched || !tracker.covers(address, bytes)) return false;
+    const auto end = address + bytes;
+    for (auto block = tracker.blockOf(address); block <= tracker.blockOf(end - 1); ++block) {
+        if (tracker.stampOf(block) == 0 && tracker.cpuStampOf(block) == 0) continue;
+        const auto from = std::max(address, tracker.blockBegin(block));
+        const auto to = std::min<std::uint64_t>(end, tracker.blockBegin(block) + WriteBlockBytes);
+        if (!runs.empty() && runs.back().second == from) runs.back().second = to;
+        else runs.emplace_back(from, to);
+    }
+    return true;
+}
+
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu) {
     std::fill(changed.begin(), changed.end(), BlockWritten);
     std::fill(cpu.begin(), cpu.end(), std::uint8_t{1});

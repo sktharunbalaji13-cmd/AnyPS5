@@ -29,6 +29,7 @@ public:
     bool TableGuardCurrent(VkDevice device, std::span<const ShaderRecompiler::BdaAbi::Range> ranges);
     VkDescriptorBufferInfo Fault() const;
     void CheckFault() const;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> TakeWrittenRanges() const;
     void CheckUse(const BdaResources* record) const;
     void NoteUse(std::uint64_t serial);
     bool TakeFaultSlot(const Context& context);
@@ -85,6 +86,7 @@ private:
     std::shared_ptr<Buffer> table;
     VkDevice faultDevice = VK_NULL_HANDLE;
     std::shared_ptr<BdaFaultChunk> faultChunk;
+    mutable std::vector<std::pair<std::uint64_t, std::uint64_t>> writtenRanges;
     VkDeviceSize faultOffset = 0;
     bool reportOnly = false;
     std::uint64_t lastUse = 0;

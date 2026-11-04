@@ -396,6 +396,8 @@ public:
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& Writes() const { return writes; }
     // Whether any written range lives in a copied buffer, so a write-back must run once the GPU is done.
     bool HasCopiedWrites() const;
+    static bool MirrorBdaWrites();
+    void WriteBackRuntimeWrites(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
     // Reports writes into host-imported memory (made by the GPU in place, or copied back into it by
     // RecordCopyBacks) to the write tracking now.
     void MarkDirectWrites() const;
@@ -578,6 +580,13 @@ private:
     // holds only the regions outside it (V#s, snapshots, ranges copied per build).
     std::shared_ptr<const AddressSpace> space;
     std::weak_ptr<const AddressSpace> releasedSpace;
+    struct ReleasedMirror {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        std::shared_ptr<ImageMirror> mirror;
+    };
+    std::vector<ReleasedMirror> releasedMirrors;
+    std::vector<std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<Buffer>>> runtimeReadbacks;
     std::uint64_t spaceHeldThrough = 0;
     std::uint64_t spaceHeldBy = 0;
     std::unique_ptr<RetainedAddressSpace> retention;
