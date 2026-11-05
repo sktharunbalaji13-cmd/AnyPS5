@@ -83,6 +83,9 @@ struct MultisampleColorAlias {
 
 std::optional<MultisampleColorAlias> MultisampleColorTargetOver(std::uint64_t address, std::size_t bytes);
 std::vector<MultisampleColorAlias> MultisampleColorTargetsOver(std::uint64_t address, std::size_t bytes);
+std::uint64_t NextHostWriteSerial();
+std::uint64_t NewestMultisampleColorWriteOver(std::uint64_t address, std::size_t bytes);
+void RetireMultisampleColorTargetsOver(std::uint64_t address, std::size_t bytes);
 void WithMultisampleTargetsLockForTest(const std::function<void()>& inside);
 
 std::uint64_t MultisampledColorBytes(const ColorTarget& target);

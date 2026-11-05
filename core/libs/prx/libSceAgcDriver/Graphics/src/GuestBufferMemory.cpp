@@ -2979,10 +2979,10 @@ bool compareBlock(const RefreshBlock& block) {
     if (block.mirror->heap) {
         const auto index = static_cast<std::size_t>(block.address / 65536 - block.mirror->base / 65536);
         auto* target = block.mirror->buffer->Bytes().data() + offset;
+        const bool same = std::memcmp(target, guest, block.length) == 0;
+        if (!same) std::memcpy(target, guest, block.length);
         block.mirror->generations[index] = block.generation;
-        if (std::memcmp(target, guest, block.length) == 0) return false;
-        std::memcpy(target, guest, block.length);
-        return true;
+        return !same;
     }
     if (std::memcmp(block.mirror->shadow.data() + offset, guest, block.length) == 0) return false;
     std::memcpy(block.mirror->buffer->Bytes().data() + offset, guest, block.length);

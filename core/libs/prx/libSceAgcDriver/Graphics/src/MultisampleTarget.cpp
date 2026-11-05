@@ -190,6 +190,7 @@ void recordCommands(const Context& context, Record&& record) {
 struct TargetUse {
     std::atomic<bool> hostOnly{true};
     std::atomic<std::uint64_t> writes{0};
+    std::atomic<std::uint64_t> written{0};
     std::atomic<bool> claimed{false};
 };
 
@@ -440,7 +441,7 @@ public:
         });
         cleared = clear;
         drawn = false;
-        ++contents;
+        NoteWritten();
     }
 
     void Recreate(const ColorTarget& use) {
@@ -457,7 +458,7 @@ public:
         const auto initial = initialDccClear(use);
         cleared = initial;
         drawn = false;
-        ++contents;
+        NoteWritten();
         recordCommands(context, [&](VkCommandBuffer commands, Recorder* recorder) {
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -509,7 +510,7 @@ public:
         });
         storageWritten = true;
         drawn = true;
-        ++contents;
+        NoteWritten();
         return selectedView;
     }
 
@@ -652,6 +653,11 @@ public:
     std::optional<VkClearColorValue> cleared;
     bool drawn = false;
     std::uint64_t contents = 0;
+
+    void NoteWritten() {
+        use->written.store(NextHostWriteSerial(), std::memory_order_release);
+        ++contents;
+    }
 
     MultisampleColorAlias Alias() const {
         MultisampleColorAlias alias{target.address, guardedColorBytes(target), target.format, target.samples};
@@ -1426,7 +1432,7 @@ SampleOrderTarget MultisampleTargetOrderTarget(const Context& context, const Col
     TargetsLock lock;
     auto& found = acquire(context, target);
     found.drawn = true;
-    ++found.contents;
+    found.NoteWritten();
     return {found.image, found.OrderView(), found.orderFormat, target.extent, target.samples, SampleOrderMethod::Storage, found.shared_from_this()};
 }
 
@@ -1434,7 +1440,7 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
     TargetsLock lock;
     auto& acquired = acquire(context, target);
     acquired.drawn = true;
-    ++acquired.contents;
+    acquired.NoteWritten();
     if (image != nullptr) *image = acquired.image;
     return acquired.View(target.format);
 }
@@ -1443,7 +1449,7 @@ VkImageView MultisampleTargetView(const Context& context, const ColorTarget& tar
     TargetsLock lock;
     auto& acquired = acquire(context, target);
     acquired.drawn = true;
-    ++acquired.contents;
+    acquired.NoteWritten();
     owner = acquired.shared_from_this();
     if (image != nullptr) *image = acquired.image;
     return acquired.View(target.format);
@@ -1822,6 +1828,34 @@ std::vector<MultisampleColorAlias> MultisampleColorTargetsOver(std::uint64_t add
         aliases.push_back(alias);
     }
     return aliases;
+}
+
+std::uint64_t NextHostWriteSerial() {
+    static std::atomic<std::uint64_t> serial{0};
+    return serial.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+std::uint64_t NewestMultisampleColorWriteOver(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return 0;
+    std::shared_lock guardLock(guardedMutex());
+    std::uint64_t newest = 0;
+    for (const auto& range : guarded()) {
+        if (address >= range.address + range.bytes || range.address >= address + bytes) continue;
+        newest = std::max(newest, range.use->written.load(std::memory_order_acquire));
+    }
+    return newest;
+}
+
+void RetireMultisampleColorTargetsOver(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || !anyGuarded().load(std::memory_order_acquire)) return;
+    std::unique_lock guardLock(guardedMutex());
+    std::vector<std::shared_ptr<std::atomic<bool>>> retired;
+    for (const auto& range : guarded()) {
+        if (address < range.address + range.bytes && range.address < address + bytes) retired.push_back(range.active);
+    }
+    for (const auto& active : retired) active->store(false, std::memory_order_release);
+    std::erase_if(guarded(), [&](const auto& range) { return std::find(retired.begin(), retired.end(), range.active) != retired.end(); });
+    anyGuarded().store(!guarded().empty(), std::memory_order_release);
 }
 
 void WithMultisampleTargetsLockForTest(const std::function<void()>& inside) {

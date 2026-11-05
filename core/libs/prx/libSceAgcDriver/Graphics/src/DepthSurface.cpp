@@ -953,6 +953,7 @@ public:
     }
 
     void NoteHostWrite() {
+        lastHostWrite = NextHostWriteSerial();
         if (samplingActive && target.format == VK_FORMAT_D32_SFLOAT_S8_UINT && context.detiler != nullptr && !hostWritten->load(std::memory_order_acquire)) {
             try {
                 const auto lease = GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
@@ -989,6 +990,7 @@ public:
     void PublishToGuest();
 
     std::uint64_t written = ++depthWrites;
+    std::uint64_t lastHostWrite = 0;
     std::shared_ptr<std::atomic<bool>> hostWritten = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<bool>> hostEverWritten = std::make_shared<std::atomic<bool>>(false);
     bool retired = false;
@@ -2410,6 +2412,7 @@ void DepthSurface::PublishToGuest() {
     Require(sampleable && context.detiler != nullptr, "sample-preserving guest publication of native multisample depth requires sampled readback support");
     const auto lease = GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
     std::array<std::vector<GuestMemory::UnchangedQuery>, 3> live;
+    std::vector<std::pair<std::uint64_t, std::size_t>> colourOver;
     {
         std::shared_lock guardLock(depthGuardMutex());
         for (std::size_t index = 0u; index < publication.size(); ++index) {
@@ -2423,17 +2426,30 @@ void DepthSurface::PublishToGuest() {
         for (const auto& part : parts) {
             Require(GuestMemory::Accessible(reinterpret_cast<const void*>(part.address), part.bytes, true) && GuestMemory::Watched(part.address, part.bytes), "native multisample depth publication requires watched accessible guest memory");
             const std::pair<std::uint64_t, std::uint64_t> range{part.address, part.address + part.bytes};
-            const bool overColour = MultisampleColorTargetOver(part.address, part.bytes).has_value();
-            const bool overStorage = !overColour && StorageTexture::AnyPendingOverlaps(std::span(&range, 1u));
-            if ((overColour || overStorage) && softDepthChecks()) {
+            if (MultisampleColorTargetOver(part.address, part.bytes)) {
+                static std::atomic<std::uint64_t> decided{0};
+                const auto count = decided.fetch_add(1, std::memory_order_relaxed) + 1;
+                const auto colourNewest = NewestMultisampleColorWriteOver(part.address, part.bytes);
+                const bool colourNewer = colourNewest > lastHostWrite;
+                if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-alias] publication of 0x%llx+0x%zx over a resident colour target: colour write %llu, depth write %llu, %s (#%llu)\n", static_cast<unsigned long long>(part.address), static_cast<std::size_t>(part.bytes), static_cast<unsigned long long>(colourNewest), static_cast<unsigned long long>(lastHostWrite), colourNewer ? "colour newer: depth discarded" : "depth newer: colour retired", static_cast<unsigned long long>(count));
+                if (colourNewer) {
+                    hostWritten->store(false, std::memory_order_release);
+                    publication.clear();
+                    active->store(false, std::memory_order_release);
+                    return;
+                }
+                colourOver.emplace_back(part.address, static_cast<std::size_t>(part.bytes));
+                continue;
+            }
+            const bool overStorage = StorageTexture::AnyPendingOverlaps(std::span(&range, 1u));
+            if (overStorage && softDepthChecks()) {
                 static std::atomic<std::uint64_t> skipped{0};
                 const auto count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-soft] native multisample depth publication over %s skipped (#%llu)\n", overColour ? "a resident colour target" : "pending storage image writes", static_cast<unsigned long long>(count));
+                if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-soft] native multisample depth publication over pending storage image writes skipped (#%llu)\n", static_cast<unsigned long long>(count));
                 hostWritten->store(false, std::memory_order_release);
                 publication.clear();
                 return;
             }
-            Require(!overColour, "native multisample depth publication over a resident colour target is not implemented");
             Require(!overStorage, "native multisample depth publication over pending storage image writes is not implemented");
         }
     }
@@ -2521,6 +2537,7 @@ void DepthSurface::PublishToGuest() {
     for (const auto& range : observed) depthCheck(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication");
     depthCheck(GuestMemory::UnchangedSinceAll(observed), "guest writes raced native multisample depth publication");
     Require(active->load(std::memory_order_acquire) && !clearPending && clearGeneration == 0u && stencilClearGeneration == 0u && pendingClear == 0u, "native multisample depth ownership changed during publication");
+    for (const auto& [address, bytes] : colourOver) RetireMultisampleColorTargetsOver(address, bytes);
     publicationFailed = true;
     if (const auto hook = depthPublicationHook.load(std::memory_order_acquire)) hook(DepthPublicationStage::BeforeCommit);
     auto seen = observed.begin();
