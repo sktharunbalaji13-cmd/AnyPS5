@@ -1,0 +1,8 @@
+[0/2] Re-checking globbed directories...
+[1/14] C:\WINDOWS\system32\cmd.exe /C "cd /D C:\anyps5\anyps5-main\.ai-work\builds\upstream\core\libs\prx\libSceAgcDriver && C:\winlibs\mingw64\bin\cmake.exe "-DGIT=C:/Program Files/Git/cmd/git.exe" -DSOURCE=C:/anyps5/anyps5-main/.ai-work/upstream -DOUTPUT=C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver/generated/prx/libSceAgcDriver/TraceRevision.hpp -P C:/anyps5/anyps5-main/.ai-work/upstream/core/libs/prx/libSceAgcDriver/trace_revision.cmake"
+[2/14] Hashing the shader recompiler sources for the shader disk cache
+[3/12] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/HostReportSources.cpp.obj
+[4/12] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/FrameRecorder.cpp.obj
+[5/12] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/PerformanceTrace.cpp.obj
+[6/12] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Graphics/src/GuestBufferMemory.cpp.obj
+[7/12] Linking CXX shared library core\libs\libs\unpatched\libSceAgcDriver.prx

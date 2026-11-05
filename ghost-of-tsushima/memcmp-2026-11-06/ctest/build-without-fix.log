@@ -1,0 +1,14 @@
+[0/2] Re-checking globbed directories...
+[1/16] Hashing the shader recompiler sources for the shader disk cache
+[2/14] C:\WINDOWS\system32\cmd.exe /C "cd /D C:\anyps5\anyps5-main\.ai-work\builds\upstream\core\libs\prx\libSceAgcDriver && C:\winlibs\mingw64\bin\cmake.exe "-DGIT=C:/Program Files/Git/cmd/git.exe" -DSOURCE=C:/anyps5/anyps5-main/.ai-work/upstream -DOUTPUT=C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver/generated/prx/libSceAgcDriver/TraceRevision.hpp -P C:/anyps5/anyps5-main/.ai-work/upstream/core/libs/prx/libSceAgcDriver/trace_revision.cmake"
+[3/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/HostReportSources.cpp.obj
+[4/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/agc_driver_address_draw_space_reuse_tests.dir/tests/execution/AddressDrawSpaceReuse.cpp.obj
+[5/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/FrameRecorder.cpp.obj
+[6/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Execution/src/PerformanceTrace.cpp.obj
+[7/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/libSceAgcDriver.dir/Graphics/src/GuestBufferMemory.cpp.obj
+[8/14] Linking CXX shared library core\libs\libs\unpatched\libSceAgcDriver.prx
+[9/14] Linking CXX executable tests\agc_driver_address_draw_space_reuse_tests.exe
+[10/14] Linking CXX executable tests\agc_driver_host_import_windows_tests.exe
+[11/14] Linking CXX executable tests\agc_driver_resident_heap_mirror_tests.exe
+[12/14] Building CXX object core/libs/prx/libSceAgcDriver/CMakeFiles/agc_driver_graphics_tests.dir/tests/Graphics.cpp.obj
+[13/14] Linking CXX executable tests\agc_driver_graphics_tests.exe

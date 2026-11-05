@@ -1,0 +1,8 @@
+[address] 73 address-based builds (10 s), us per build: lease 11, imports pass 26158, mirror prepare 56834, compare 12465 (2238 blocks, 178.7 copied), snapshots 509
+[address] 91 address-based builds (10 s), us per build: lease 12, imports pass 123, mirror prepare 50665, compare 8670 (2189 blocks, 136.0 copied), snapshots 566
+[address] 32 address-based builds (10 s), us per build: lease 453, imports pass 1205, mirror prepare 161919, compare 25682 (2265 blocks, 187.4 copied), snapshots 718
+[address] 97 address-based builds (10 s), us per build: lease 60, imports pass 1446, mirror prepare 32547, compare 9909 (1713 blocks, 106.4 copied), snapshots 132
+[address] 107 address-based builds (10 s), us per build: lease 54, imports pass 4565, mirror prepare 42329, compare 14907 (1933 blocks, 144.7 copied), snapshots 3
+[address] 63 address-based builds (10 s), us per build: lease 60, imports pass 1596, mirror prepare 101260, compare 19996 (2344 blocks, 114.2 copied), snapshots 3
+[address] 182 address-based builds (10 s), us per build: lease 25, imports pass 102, mirror prepare 26765, compare 8313 (1845 blocks, 65.9 copied), snapshots 4
+[address] 127 address-based builds (10 s), us per build: lease 28, imports pass 0, mirror prepare 20250, compare 6536 (1419 blocks, 42.6 copied), snapshots 32
