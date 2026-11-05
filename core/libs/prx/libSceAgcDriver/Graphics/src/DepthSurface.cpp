@@ -942,13 +942,24 @@ public:
                 std::vector<PublicationPlane> captured;
                 for (const auto& range : sampling.initial) captured.push_back(CapturePublication(range));
                 for (const auto& plane : captured) {
-                    Require(GuestMemory::UnchangedSinceCollected(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture");
-                    Require(GuestMemory::UnchangedSince(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture");
+                    Require(GuestMemory::UnchangedSinceCollected(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (a)");
+                    Require(GuestMemory::UnchangedSince(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (b)");
                 }
-                for (const auto& range : sampling.initial) Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication capture");
-                Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes raced native multisample depth publication capture");
+                for (const auto& range : sampling.initial) Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication capture (c)");
+                Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes raced native multisample depth publication capture (d)");
                 publication = std::move(captured);
-            } catch (...) {
+            } catch (const std::exception& error) {
+                if (std::getenv("APS5_TRACE_DEPTH_RACE") != nullptr) {
+                    std::fprintf(stderr, "[depth-race] %s; initial", error.what());
+                    for (const auto& range : sampling.initial) std::fprintf(stderr, " 0x%llx+0x%zx collected %d all %d", static_cast<unsigned long long>(range.address), static_cast<std::size_t>(range.bytes), GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation) ? 1 : 0, GuestMemory::UnchangedSinceAll(std::span(&range, 1u)) ? 1 : 0);
+                    bool retried = true;
+                    try {
+                        for (const auto& range : sampling.initial) static_cast<void>(CapturePublication(range));
+                    } catch (...) {
+                        retried = false;
+                    }
+                    std::fprintf(stderr, "; immediate recapture %s\n", retried ? "succeeded" : "failed");
+                }
                 publicationFailure = std::current_exception();
                 publication.clear();
             }
@@ -1554,7 +1565,8 @@ private:
                 plane.stored.insert(plane.stored.end(), page.begin(), page.begin() + length);
             }
         }
-        Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture");
+        if (std::getenv("APS5_TRACE_DEPTH_RACE") != nullptr && !(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation))) std::fprintf(stderr, "[depth-race] capture 0x%llx+0x%zx collected %d since %d\n", static_cast<unsigned long long>(range.address), static_cast<std::size_t>(range.bytes), GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) ? 1 : 0, GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation) ? 1 : 0);
+        Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (e)");
         return plane;
     }
 

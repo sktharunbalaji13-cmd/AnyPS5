@@ -157,6 +157,40 @@ bool backWritableImageAnonymously() {
 
 }
 
+#ifdef _WIN32
+void traceEnd(bool empty, void* caller) {
+    static const bool enabled = std::getenv("APS5_TRACE_GENERATION") != nullptr;
+    if (!enabled) return;
+    static std::mutex lock;
+    static std::map<std::uintptr_t, std::uint64_t> callers;
+    static std::uint64_t emptyEnds = 0, changedEnds = 0;
+    static auto last = std::chrono::steady_clock::now();
+    std::lock_guard guard(lock);
+    ++(empty ? emptyEnds : changedEnds);
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCWSTR>(caller), &module);
+    if (empty) ++callers[reinterpret_cast<std::uintptr_t>(caller)];
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    last = now;
+    std::fprintf(stderr, "[generation] ends empty %llu changed %llu\n",static_cast<unsigned long long>(emptyEnds), static_cast<unsigned long long>(changedEnds));
+    std::vector<std::pair<std::uint64_t, std::uintptr_t>> top;
+    for (const auto& [address, count] : callers) top.emplace_back(count, address);
+    std::sort(top.rbegin(), top.rend());
+    for (std::size_t i = 0; i < top.size() && i < 8; ++i) {
+        HMODULE owner = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(top[i].second), &owner);
+        wchar_t name[MAX_PATH]{};
+        GetModuleFileNameW(owner, name, MAX_PATH);
+        std::fprintf(stderr, "[generation]   empty from %ls +0x%llx: %llu\n",name, static_cast<unsigned long long>(top[i].second - reinterpret_cast<std::uintptr_t>(owner)), static_cast<unsigned long long>(top[i].first));
+    }
+    emptyEnds = changedEnds = 0;
+    callers.clear();
+}
+#else
+void traceEnd(bool, void*) {}
+#endif
+
 void* GuestAllocationsBegin_nid_postfix() {
     auto* state = new MutationState{std::unique_lock<std::mutex>(registry().mutex), {}};
     registry().readableLease.reset();
@@ -167,6 +201,7 @@ void* GuestAllocationsBegin_nid_postfix() {
 void GuestAllocationsEnd_nid_postfix(void* mutation) noexcept {
     auto* state = static_cast<MutationState*>(mutation);
     for (const auto& [address, bytes] : state->unpinned) renewBacking(address, bytes);
+    traceEnd(state->changed.empty() && state->unpinned.empty() && state->gpuMapped.empty(), __builtin_return_address(0));
     const auto ended = generation.fetch_add(1, std::memory_order_release) + 1;
     if (const auto callback = invalidator.load(std::memory_order_acquire)) {
         for (const auto& [address, bytes] : state->changed) callback(address, bytes);

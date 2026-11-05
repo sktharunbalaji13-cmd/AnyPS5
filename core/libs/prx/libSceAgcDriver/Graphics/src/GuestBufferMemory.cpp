@@ -446,7 +446,24 @@ void importSetChanged() {
     importSetGeneration.fetch_add(1, std::memory_order_release);
 }
 
+thread_local int retireSite = 0;
+std::array<std::atomic<std::uint64_t>, 10> retireCounts{};
+std::atomic<std::uint64_t> refreshImportsUs{0};
+void traceRetires() {
+    static const bool enabled = std::getenv("APS5_TRACE_RETIRES") != nullptr;
+    if (!enabled) return;
+    static std::atomic<std::int64_t> last{0};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto seen = last.load(std::memory_order_relaxed);
+    if (now - seen < 10000 || !last.compare_exchange_strong(seen, now)) return;
+    std::fprintf(stderr, "[retires] 10 s by site: evict-lru %llu overlap %llu joined %llu refresh %llu unmap-wait %llu unmap-done %llu device %llu other %llu; refreshImports %llu ms\n", static_cast<unsigned long long>(retireCounts[1].exchange(0)), static_cast<unsigned long long>(retireCounts[2].exchange(0)), static_cast<unsigned long long>(retireCounts[3].exchange(0)), static_cast<unsigned long long>(retireCounts[4].exchange(0)), static_cast<unsigned long long>(retireCounts[5].exchange(0)), static_cast<unsigned long long>(retireCounts[6].exchange(0)), static_cast<unsigned long long>(retireCounts[7].exchange(0)), static_cast<unsigned long long>(retireCounts[0].exchange(0)), static_cast<unsigned long long>(refreshImportsUs.exchange(0) / 1000));
+}
+
 void bumpEpoch(HostImports& state) {
+    retireCounts[static_cast<std::size_t>(retireSite)].fetch_add(1, std::memory_order_relaxed);
+    if (retireSite == 2) retireCounts[9].fetch_add(1, std::memory_order_relaxed);
+    retireSite = 0;
+    traceRetires();
     ++state.epoch;
     importSetChanged();
 }
@@ -1660,6 +1677,15 @@ std::pair<std::size_t, std::size_t> continuedRun(const GuestAllocations::Lease& 
     return entry.run;
 }
 
+bool joinedWithin(const HostImports& state, std::uint64_t begin, std::uint64_t end) {
+    auto it = state.imports.lower_bound(begin);
+    if (it != state.imports.begin() && std::prev(it)->second.joined && std::prev(it)->first + std::prev(it)->second.bytes > begin) return true;
+    for (; it != state.imports.end() && it->first < end; ++it) {
+        if (it->second.joined) return true;
+    }
+    return false;
+}
+
 RunBounds importRunBounds(const GuestAllocations::Lease& lease, std::uint64_t address, std::uint64_t largest = std::numeric_limits<std::uint64_t>::max(), std::uint64_t budget = 0) {
     const auto index = leasedIndexContaining(lease, address);
     if (index == lease.size()) return {};
@@ -1692,7 +1718,7 @@ RunBounds importRunBounds(const GuestAllocations::Lease& lease, std::uint64_t ad
         const auto blockLast = bounding(index, last, blockHigh, false);
         if (blockFirst == lease.size() || blockLast == lease.size()) continue;
         if (blockFirst == blockLast) break;
-        if (skipped(blockFirst, blockLast)) continue;
+        if (skipped(blockFirst, blockLast) || joinedWithin(state, blockLow, blockHigh)) continue;
         return {blockFirst, blockLast, true};
     }
     return single;
@@ -1874,7 +1900,7 @@ std::uint64_t retireLeastRecent(const Context& context, HostImports& state, cons
         if (oldest == state.imports.end()) break;
         freed += oldest->second.pinnedBytes;
         noteRetiredUnwatched(unwatched, oldest->second, lease);
-        retireImport(context.device, state, oldest, lease);
+        retireSite = 1, retireImport(context.device, state, oldest, lease);
     }
     rewatchRetired(state, std::move(unwatched));
     return freed;
@@ -2197,7 +2223,10 @@ const HostImport* importJoined(const Context& context, HostImports& state, std::
     const auto existing = state.imports.find(run.base);
     const bool existed = existing != state.imports.end() && sameRun(existing->second, run);
     const auto* entry = importRunAt(context, state, std::move(run), true, begin, lease, end, true, ImportRequester::Join);
-    if (entry != nullptr && !existed) ++state.epoch;
+    if (entry != nullptr && !existed) {
+        retireCounts[3].fetch_add(1, std::memory_order_relaxed);
+        ++state.epoch;
+    }
     return entry;
 }
 
@@ -2299,7 +2328,9 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     }
     for (auto it = first; it != state.imports.end() && it->first < base + bytes;) {
         const auto next = std::next(it);
-        retireImport(context.device, state, it, lease);
+        static std::atomic<std::uint64_t> overlapSamples{0};
+        if (std::getenv("APS5_TRACE_RETIRES") != nullptr && retireCounts[9].load(std::memory_order_relaxed) > 2000 && overlapSamples.fetch_add(1) < 80) std::fprintf(stderr, "[retires] overlap: new 0x%llx+0x%llx joined %d by %s (%zu ranges) retires 0x%llx+0x%llx joined %d (%zu ranges)\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), joined ? 1 : 0, ImportRequesterName(requester), run.ranges.size(), static_cast<unsigned long long>(it->first), static_cast<unsigned long long>(it->second.bytes), it->second.joined ? 1 : 0, it->second.ranges.size());
+        retireSite = 2, retireImport(context.device, state, it, lease);
         it = next;
     }
     if (state.liveBytes + bytes > budget) retireLeastRecent(context, state, lease, state.liveBytes + bytes - budget);
@@ -2555,6 +2586,7 @@ void refreshImports(const Context& context, HostImports& state, const GuestAlloc
         state.refreshedWindow = 0;
         state.pendingImports.clear();
         state.refreshedGeneration = 0;
+        retireSite = 7;
         bumpEpoch(state);
     }
     if (state.destroyBuffer == nullptr) state.destroyBuffer = context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer");
@@ -2593,7 +2625,7 @@ void refreshImports(const Context& context, HostImports& state, const GuestAlloc
         if (trace && leasedRangeOwner(lease, it->first, it->first + it->second.bytes) != nullptr) std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx retired: the range was mapped again\n", static_cast<unsigned long long>(it->first), static_cast<unsigned long long>(it->second.bytes));
         const auto next = std::next(it);
         noteRetiredUnwatched(unwatched, it->second, lease);
-        retireImport(context.device, state, it, lease);
+        retireSite = 4, retireImport(context.device, state, it, lease);
         return next;
     };
     if (whole) {
@@ -3755,7 +3787,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
                     continue;
                 }
                 const auto next = std::next(it);
-                retireImport(imports.device, imports, it, lease, false);
+                retireSite = 5, retireImport(imports.device, imports, it, lease, false);
                 it = next;
                 retiredImport = true;
             }
@@ -3821,7 +3853,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) {
                         continue;
                     }
                     const auto next = std::next(it);
-                    retireImport(imports.device, imports, it, lease, false);
+                    retireSite = 6, retireImport(imports.device, imports, it, lease, false);
                     it = next;
                     retiredImport = true;
                 }
@@ -4882,7 +4914,9 @@ void GuestBufferMemory::AcquireRegistered() {
         {
             auto& state = Imports();
             std::lock_guard lock(state.mutex);
+            const auto refreshStart = std::chrono::steady_clock::now();
             if (importable) refreshImports(context, state, lease);
+            refreshImportsUs.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - refreshStart).count()), std::memory_order_relaxed);
             if (importFloor == 0) importFloor = state.useCounter + 1;
             state.buildFloor = importFloor;
             // Taken before the pass: the imports it takes are the registry's ones (just reconciled, so
