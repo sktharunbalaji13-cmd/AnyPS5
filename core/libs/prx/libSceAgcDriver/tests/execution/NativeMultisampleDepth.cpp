@@ -25,6 +25,7 @@
 #include <SDL_loadso.h>
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <barrier>
 #include <bit>
 #include <chrono>
@@ -1925,6 +1926,76 @@ void CheckDepthTarget(Context context, VkFormat format, std::uint32_t fragments,
     std::printf("Native depth format=%u samples=%u clear=%u iterate256=%u: imported, rasterized twice, sampled and refused conflicts\n", static_cast<std::uint32_t>(format), fragments, one, iterate256);
 }
 
+void CheckIdleSampleShadowRelease(Context context, VkFormat format, std::uint32_t fragments) {
+    const VkExtent2D extent{5u, 3u};
+    const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
+    TargetMemory memory(bytes), metadata(65536u);
+    const auto metadataBytes = HtileMetadataBytes(extent);
+    const std::uint32_t pattern = 0xfffffff0u;
+    for (std::size_t i = 0u; i < metadataBytes / 4u; ++i) std::memcpy(metadata.Data() + i * 4u, &pattern, 4u);
+    DepthTarget target{memory.Address(), 0u, extent, format, 1.0f, 0u, metadata.Address(), false, fragments};
+    target.depthSwizzle = 24u;
+    target.pipeBankXor = 0x8c00u;
+    target.htileDepthOnly = true;
+    target.iterate256 = true;
+    target.htilePipeAligned = true;
+    TargetMemory otherMemory(static_cast<std::size_t>(DepthSliceBytes(extent, 4u)));
+    DepthTarget otherTarget{otherMemory.Address(), 0u, extent, VK_FORMAT_D32_SFLOAT, 0.0f, 0u, 0u, false, 1u};
+    Recorder recorder(context);
+    recorder.Activate();
+    struct Cleanup {
+        Recorder& recorder;
+        Context context;
+        ~Cleanup() { recorder.Sync(); ClearCachedTextures(context.device); ClearDepthSurfaces(context.device); }
+    } cleanup{recorder, context};
+    const auto view = DepthSurfaceView(context, target);
+    NoteDepthSurfaceWrite(context, target);
+    const auto words = DepthSampleWords(target);
+    const auto count = extent.width * extent.height * fragments;
+    Buffer output(context, (count + 2u) * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const auto fetchAndCheck = [&](const std::shared_ptr<Texture>& texture, const char* when) {
+        const Fetch fetch(context, *texture, output, FetchShader(extent.width, extent.height, fragments, false, true));
+        std::memset(output.Bytes().data(), 0xa5, output.Bytes().size());
+        CommandBatch batch(context);
+        fetch.Run(batch.Handle(), count);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        output.Invalidate();
+        for (std::uint32_t index = 0u; index < count; ++index) {
+            std::array<float, 4> result{};
+            std::memcpy(result.data(), output.Bytes().data() + (index + 1u) * 16u, 16u);
+            const auto expected = static_cast<float>(index % fragments + 1u) / 16.0f;
+            const auto tolerance = format == VK_FORMAT_D16_UNORM ? 1.0f / 65535.0f : 0.0f;
+            Require(std::isfinite(result[0]) && std::abs(result[0] - expected) <= tolerance, std::string("native depth sampled fetch ") + when + " lost a raster sample");
+        }
+    };
+    {
+        const DepthRaster raster(context, target, view);
+        CommandBatch batch(context);
+        raster.Run(batch.Handle(), 0.0f);
+        batch.SubmitAndWait();
+    }
+    DepthSurfaceView(context, otherTarget);
+    recorder.Sync();
+    {
+        const auto texture = CachedSampledTexture(context, words);
+        Require(texture != nullptr, "the native depth target has no sampled view");
+        fetchAndCheck(texture, "before the shadow release");
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        Require(ReleaseIdleDepthSampleShadows(std::numeric_limits<std::uint64_t>::max()) == 0u, "a sample shadow whose view is still held was released");
+    }
+    recorder.Sync();
+    std::size_t released = 0u;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        released = ReleaseIdleDepthSampleShadows(std::numeric_limits<std::uint64_t>::max());
+        Require(released <= 1u && ReleaseIdleDepthSampleShadows(std::numeric_limits<std::uint64_t>::max()) == 0u, "an idle sample shadow was released more than once");
+    }
+    const auto again = CachedSampledTexture(context, words);
+    Require(again != nullptr, "the native depth target has no sampled view after its shadow was released");
+    fetchAndCheck(again, "after the shadow release");
+}
+
 void CheckUnwrittenGuestAccess(Context context, VkFormat format, std::uint32_t fragments) {
     const VkExtent2D extent{5u, 3u};
     const auto bytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, format == VK_FORMAT_D16_UNORM ? 2u : 4u, fragments));
@@ -3660,6 +3731,7 @@ int main(int argc, char** argv) {
                 }
                 CheckHtileRouting(context, format, samples);
                 CheckUnwrittenGuestAccess(context, format, samples);
+                CheckIdleSampleShadowRelease(context, format, samples);
             }
         }
         {

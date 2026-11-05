@@ -934,6 +934,15 @@ public:
         return std::any_of(textures.begin(), textures.end(), [](const auto& entry) { return entry.second.use_count() > 1; });
     }
 
+    bool ReleaseSampleShadow() {
+        if (sampleShadow == nullptr || SampledElsewhere()) return false;
+        textures.clear();
+        sampleShadow.reset();
+        sampleShadowWritten = 0u;
+        sampleShadowStencil = false;
+        return true;
+    }
+
     void NoteHostWrite() {
         if (samplingActive && target.format == VK_FORMAT_D32_SFLOAT_S8_UINT && context.detiler != nullptr && !hostWritten->load(std::memory_order_acquire)) {
             try {
@@ -2923,6 +2932,17 @@ void retireStoringStale(DepthSurface& surface) {
 
 std::uint64_t DepthSurfacesSerial() {
     return surfacesSerial.load(std::memory_order_acquire);
+}
+
+std::size_t ReleaseIdleDepthSampleShadows(std::uint64_t bytes) {
+    const auto releasedBefore = ImageMemoryReleasedBytes();
+    std::size_t released = 0;
+    for (const auto& surface : surfaces()) {
+        if (ImageMemoryReleasedBytes() - releasedBefore >= bytes) break;
+        if (surface.get() == drawnDepth || !surface->ReleaseSampleShadow()) continue;
+        ++released;
+    }
+    return released;
 }
 
 std::uint64_t DepthSurfacesReleased() {

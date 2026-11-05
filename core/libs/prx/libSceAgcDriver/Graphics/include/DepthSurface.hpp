@@ -34,6 +34,7 @@ void NoteDepthSurfaceWrite(const Context& context, const DepthTarget& target);
 bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std::uint32_t samples);
 std::uint64_t DepthSurfacesSerial();
 std::uint64_t DepthSurfacesReleased();
+std::size_t ReleaseIdleDepthSampleShadows(std::uint64_t bytes);
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
 bool DirectDepthCopy(const Context& context, VkFormat depthFormat, VkImageAspectFlagBits aspect, VkFormat colorFormat);
 void SetDirectDepthCopy(bool enabled);

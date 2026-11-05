@@ -1656,8 +1656,15 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
             }
         }
     }
+    std::size_t depthShadows = 0;
+    bool depthSkipped = false;
+    if (ImageMemoryReleasedBytes() - releasedBefore < bytes) {
+        std::unique_lock<GuestMemory::GpuMutexType> gpu(GuestMemory::GpuMutex(), std::defer_lock);
+        if (gpu.try_lock()) depthShadows = ReleaseIdleDepthSampleShadows(bytes - (ImageMemoryReleasedBytes() - releasedBefore));
+        else depthSkipped = true;
+    }
     freed = ImageMemoryReleasedBytes() - releasedBefore;
-    std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept);
+    std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept, %zu depth sample shadows%s\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept, depthShadows, depthSkipped ? " (device busy, skipped)" : "");
     return freed;
 }
 
