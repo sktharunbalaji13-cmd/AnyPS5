@@ -1,0 +1,768 @@
+UpdateCTestConfiguration  from :C:/anyps5/anyps5-main/.ai-work/builds/upstream/DartConfiguration.tcl
+Test project C:/anyps5/anyps5-main/.ai-work/builds/upstream
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1076
+      Start 1076: agc_driver_address_draw_space_reuse
+
+1076: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_address_draw_space_reuse_tests.exe
+1076: Working Directory: C:/anyps5/anyps5-main/.ai-work/upstream
+1076: Environment variables: 
+1076:  ANYPS5_NO_SHADER_CACHE=1
+1076:  APS5_NO_PIPELINE_JOURNAL=1
+1076: Environment variable modifications: 
+1076:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1076: Test timeout computed to be: 10000000
+1076: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1076: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1076: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1076: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1076: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020e6c1ee9f0
+1076: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1076: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020ef2f55df0 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1076: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020ef2f55dc0 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1076: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020ef2f55dc0 queueFamily=0
+1076: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1076: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1076: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1076: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1076: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1076: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1076: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1076: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1076: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1076: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1076: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1076: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1076: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1076: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1076: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020e004b00d0 queue=0000020e003d14d0 family=0
+1076: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1076: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 66 ms)
+1076: [gpu] deferred write-back failed: BDA access failed: address=0x20ef3d30100 instruction=0x10 bytes=1 stage=2 reason=1
+1076: [gpu] deferred write-back failed: BDA access failed: address=0x20ef3d30200 instruction=0x10 bytes=1 stage=2 reason=1
+1076: [gpu] deferred write-back failed: BDA access failed: address=0x20ef3d30300 instruction=0x10 bytes=1 stage=2 reason=1
+1076: [gpu] deferred write-back failed: BDA access failed: address=0x20ef3d30400 instruction=0x10 bytes=1 stage=2 reason=1
+1076: [gpu] guest snapshot differs from registered memory: snapshot 0x200030100+0x1c (live region 0x200020000+0x20000, host-backed) differs first at +0x18; the live region serves the GPU (1 mismatches so far; APS5_SNAPSHOT_CHECK_FATAL=1 fails the dispatch instead)
+1076: address draw space reuse tests passed
+ 1/22 Test #1076: agc_driver_address_draw_space_reuse ...............   Passed    3.86 sec
+test 1295
+      Start 1295: agc_driver_host_import_windows
+
+1295: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_host_import_windows_tests.exe
+1295: Working Directory: C:/anyps5/anyps5-main/.ai-work/upstream
+1295: Environment variables: 
+1295:  ANYPS5_NO_SHADER_CACHE=1
+1295:  APS5_NO_PIPELINE_JOURNAL=1
+1295: Environment variable modifications: 
+1295:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1295: Test timeout computed to be: 10000000
+1295: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1295: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1295: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1295: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1295: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020eb2da6230
+1295: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccb390 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccb3c0 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1295: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020f7fccb3c0 queueFamily=0
+1295: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1295: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1295: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1295: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1295: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1295: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1295: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1295: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020ebce900d0 queue=0000020ebcd914d0 family=0
+1295: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1295: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 64 ms)
+1295: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1295: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1295: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020e826ab890
+1295: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccb8a0 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccba80 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1295: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020f7fccba80 queueFamily=0
+1295: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1295: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1295: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1295: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1295: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1295: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1295: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1295: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020ec0a200d0 queue=0000020ebcd914d0 family=0
+1295: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1295: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 56 ms)
+1295: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1295: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1295: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020e826ab890
+1295: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccb1e0 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccba20 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1295: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020f7fccba20 queueFamily=0
+1295: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1295: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1295: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1295: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1295: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1295: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1295: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1295: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020ec0a200d0 queue=0000020ebcd919d0 family=0
+1295: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 55 ms)
+1295: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1295: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1295: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020e826ab890
+1295: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020e82705970 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020e82705af0 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1295: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020e82705af0 queueFamily=0
+1295: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1295: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1295: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1295: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1295: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1295: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1295: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1295: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020ec0a200d0 queue=0000020ebcd923d0 family=0
+1295: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 58 ms)
+1295: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1295: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1295: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000020f7fc9a760
+1295: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccc290 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1295: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000020f7fccc2c0 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1295: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000020f7fccc2c0 queueFamily=0
+1295: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1295: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1295: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1295: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1295: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1295: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1295: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1295: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1295: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1295: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000020ec0a200d0 queue=0000020ebcd900d0 family=0
+1295: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 63 ms)
+1295: host import windows tests passed
+ 2/22 Test #1295: agc_driver_host_import_windows ....................   Passed    3.25 sec
+test 1533
+      Start 1533: agc_driver_resident_heap_mirror
+
+1533: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_resident_heap_mirror_tests.exe
+1533: Working Directory: C:/anyps5/anyps5-main/.ai-work/upstream
+1533: Environment variables: 
+1533:  ANYPS5_NO_SHADER_CACHE=1
+1533:  APS5_NO_PIPELINE_JOURNAL=1
+1533: Environment variable modifications: 
+1533:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1533: Test timeout computed to be: 10000000
+1533: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1533: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1533: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1533: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1533: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000021efb7d4fd0
+1533: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1533: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000021f7e7a8150 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1533: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000021f7e7a7940 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1533: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000021f7e7a7940 queueFamily=0
+1533: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1533: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1533: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1533: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1533: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1533: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1533: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1533: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1533: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1533: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1533: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1533: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1533: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1533: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1533: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000021e804b00d0 queue=0000021e803b14d0 family=0
+1533: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1533: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 62 ms)
+1533: [gpu] host import budget: 0 MiB live of 0 MiB (APS5_HOST_IMPORT_MIB; host heap 1 reports a budget of 7180 MiB and a usage of 26 MiB); 1 imports (8 MiB) refused so far, 0 of them remembered, last 0x200010000+0x800000 by build
+1533: [src/Texture.cpp:3197 upload] StorageTexture upload submit
+1533: [src/Texture.cpp:3199 upload] StorageTexture upload done
+1533: [src/Texture.cpp:3197 upload] StorageTexture upload submit
+1533: [src/Texture.cpp:3199 upload] StorageTexture upload done
+1533: [src/Texture.cpp:3197 upload] StorageTexture upload submit
+1533: [src/Texture.cpp:3199 upload] StorageTexture upload done
+1533: resident heap mirror tests passed
+ 3/22 Test #1533: agc_driver_resident_heap_mirror ...................   Passed    2.17 sec
+test 1727
+      Start 1727: agc_driver_address_draw_space_reuse_off
+
+1727: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_address_draw_space_reuse_tests.exe "--off"
+1727: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1727: Environment variables: 
+1727:  APS5_NO_ADDRESS_DRAW_REUSE=1
+1727:  APS5_NO_PIPELINE_JOURNAL=1
+1727: Environment variable modifications: 
+1727:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1727: Test timeout computed to be: 60
+1727: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1727: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1727: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1727: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1727: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=000002929f6dd740
+1727: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1727: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=00000292e1f39c20 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1727: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=00000292e1f39e90 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1727: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=00000292e1f39e90 queueFamily=0
+1727: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1727: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1727: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1727: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1727: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1727: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1727: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1727: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1727: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1727: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1727: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1727: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1727: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1727: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1727: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=00000292a17c00d0 queue=00000292a16e14d0 family=0
+1727: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1727: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 60 ms)
+1727: address draw space reuse tests passed --off
+ 4/22 Test #1727: agc_driver_address_draw_space_reuse_off ...........   Passed    1.72 sec
+test 1728
+      Start 1728: agc_driver_address_draw_space_reuse_transitions
+
+1728: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_address_draw_space_reuse_tests.exe "--transitions"
+1728: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1728: Environment variables: 
+1728:  APS5_DRAW_TRANSITIONS=1
+1728:  APS5_NO_PIPELINE_JOURNAL=1
+1728: Environment variable modifications: 
+1728:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1728: Test timeout computed to be: 60
+1728: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1728: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1728: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1728: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1728: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000018f1aebdc40
+1728: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1728: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000018fe1d006f0 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1728: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=0000018fe1d00600 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1728: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=0000018fe1d00600 queueFamily=0
+1728: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1728: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1728: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1728: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1728: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1728: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1728: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1728: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1728: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1728: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1728: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1728: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1728: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1728: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1728: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000018f1d0b00d0 queue=0000018f1cfd14d0 family=0
+1728: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1728: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 57 ms)
+1728: address draw space reuse tests passed --transitions
+ 5/22 Test #1728: agc_driver_address_draw_space_reuse_transitions ...   Passed    1.15 sec
+test 1729
+      Start 1729: agc_driver_address_draw_space_reuse_verify
+
+1729: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_address_draw_space_reuse_tests.exe "--verify"
+1729: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1729: Environment variables: 
+1729:  APS5_VERIFY_ADDRESS_DRAW_REUSE=1
+1729:  APS5_NO_PIPELINE_JOURNAL=1
+1729: Environment variable modifications: 
+1729:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1729: Test timeout computed to be: 60
+1729: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1729: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1729: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1729: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1729: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=0000022f86fdea30
+1729: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1729: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=000002304e123650 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1729: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=000002304e123800 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1729: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=000002304e123800 queueFamily=0
+1729: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1729: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1729: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1729: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1729: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1729: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1729: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1729: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1729: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1729: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1729: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1729: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1729: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1729: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1729: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=0000022f892d00d0 queue=0000022f891f14d0 family=0
+1729: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1729: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 61 ms)
+1729: [gpu] deferred write-back failed: BDA access failed: address=0x23051760100 instruction=0x10 bytes=1 stage=2 reason=1
+1729: [gpu] deferred write-back failed: BDA access failed: address=0x23051760200 instruction=0x10 bytes=1 stage=2 reason=1
+1729: [gpu] deferred write-back failed: BDA access failed: address=0x23051760300 instruction=0x10 bytes=1 stage=2 reason=1
+1729: [gpu] deferred write-back failed: BDA access failed: address=0x23051760400 instruction=0x10 bytes=1 stage=2 reason=1
+1729: [gpu] guest snapshot differs from registered memory: snapshot 0x200030100+0x1c (live region 0x200020000+0x20000, host-backed) differs first at +0x18; the live region serves the GPU (1 mismatches so far; APS5_SNAPSHOT_CHECK_FATAL=1 fails the dispatch instead)
+1729: address draw space reuse: APS5_VERIFY_ADDRESS_DRAW_REUSE verified 76 of 76 served hits
+1729: address draw space reuse tests passed --verify
+ 6/22 Test #1729: agc_driver_address_draw_space_reuse_verify ........   Passed    1.91 sec
+test 1730
+      Start 1730: agc_driver_address_draw_space_reuse_held
+
+1730: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_address_draw_space_reuse_tests.exe "--held"
+1730: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1730: Environment variables: 
+1730:  APS5_RELEASE_ON_UNLOCK=1
+1730:  APS5_NO_PIPELINE_JOURNAL=1
+1730: Environment variable modifications: 
+1730:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1730: Test timeout computed to be: 60
+1730: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1730: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1730: [src/VulkanDevice.cpp:1310 VulkanDevice] VulkanDevice constructor window=0000000000000000
+1730: [src/VulkanDevice.cpp:1321 VulkanDevice] Vulkan loader loaded library=00007fff32b20000
+1730: [src/VulkanDevice.cpp:1365 VulkanDevice] Vulkan instance created instance=000002c67dc7e600
+1730: [src/VulkanDevice.cpp:1376 VulkanDevice] Physical device count=2
+1730: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=000002c645243a10 name=AMD Radeon(TM) Graphics api=0x404167 type=1
+1730: [src/VulkanDevice.cpp:1410 VulkanDevice] Physical device candidate=000002c6452435f0 name=NVIDIA GeForce RTX 4060 Laptop GPU api=0x40415f type=2
+1730: [src/VulkanDevice.cpp:1458 VulkanDevice] Physical device selected physical=000002c6452435f0 queueFamily=0
+1730: [src/VulkanDevice.cpp:1472 VulkanDevice] Selected GPU name=NVIDIA GeForce RTX 4060 Laptop GPU vendor=0x10de device=0x28a0 subgroup=32
+1730: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 0 size=7956.0 MiB flags=0x1
+1730: [src/VulkanDevice.cpp:1474 VulkanDevice] Memory heap 1 size=7827.4 MiB flags=0x0
+1730: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 0 heap=1 flags=0x0
+1730: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 1 heap=0 flags=0x1
+1730: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 2 heap=1 flags=0x6
+1730: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 3 heap=1 flags=0xe
+1730: [src/VulkanDevice.cpp:1475 VulkanDevice] Memory type 4 heap=0 flags=0x7
+1730: [src/VulkanDevice.cpp:1495 VulkanDevice] Pixel interpolation driver=4 hostInterpolationFirst=0
+1730: [src/VulkanDevice.cpp:1575 VulkanDevice] Shader clock driver=4 narrowSubgroupClock=0
+1730: [gpu] largest sample location grids (vkGetPhysicalDeviceMultisamplePropertiesEXT): 1 samples 4x4, 2 samples 2x4, 4 samples 2x2, 8 samples 1x2; maxSampleLocationGridSize for every count 1x1
+1730: [src/VulkanDevice.cpp:1975 VulkanDevice] Vulkan features tessellationAvailable=1 mesh=1 depthClip=1 depthRangeUnrestricted=1 pipelineLibrary=1
+1730: [src/VulkanDevice.cpp:2247 VulkanDevice] Wave32 programs run on subgroups of 32: compute 1, mesh 1
+1730: [src/VulkanDevice.cpp:2250 VulkanDevice] single-wave wave64 compute spans two full 32-lane subgroups: 1
+1730: [src/VulkanDevice.cpp:2399 VulkanDevice] Vulkan device ready device=000002c6004b00d0 queue=000002c6003d14d0 family=0
+1730: [write-watch] host imports of write-watched memory keep the write watch: yes (4096 of 4096 scratch pages reported written at the import, 0 by its 4-byte settle read, 0 after it, 0 after a full GPU read, 0 after a second, 0 after a GPU write, 1 after a CPU store); direct host imports of private memory are settled and stay watched, separate shared aliases retain guest write tracking
+1730: [float-controls] f32 denormal flush: hardware (0 of 5472 probe results differ from the emulated flush, 60 ms)
+1730: address draw space reuse tests passed --held
+ 7/22 Test #1730: agc_driver_address_draw_space_reuse_held ..........   Passed    1.53 sec
+test 1853
+      Start 1853: agc_driver_graphics
+
+1853: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe
+1853: Working Directory: C:/anyps5/anyps5-main/.ai-work/upstream
+1853: Environment variables: 
+1853:  ANYPS5_NO_SHADER_CACHE=1
+1853:  APS5_NO_PIPELINE_JOURNAL=1
+1853: Environment variable modifications: 
+1853:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1853: Test timeout computed to be: 10000000
+1853: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1853: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1853: [gpu] always-pass depth/stencil state is rendered without a depth target (DB_DEPTH_CONTROL=0x007007b3)
+1853: [gpu] viewport depth clamp bounds [-1, 2] on a float depth target are clipped to [0, 1]: the device has no VK_EXT_depth_range_unrestricted
+1853: [gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x01240000)
+1853: [gpu] DCC keys of mipmapped array and 3D color targets are ignored
+1853: [gpu] no 2x2 sample location grid at sample count 2 on this device: sample locations varying between pixels take pixel (0,0)'s in every pixel (the device lacks sampleRateShading)
+1853: [gpu] no 2x2 sample location grid at sample count 1 on this device: sample locations varying between pixels take pixel (0,0)'s in every pixel (its pixels hold different locations)
+1853: [gpu] no 2x2 sample location grid at sample count 2 on this device: pixel (0,0)'s sample locations stand in for every pixel, and each pixel's samples are put in the guest's order at the bounds of its render passes
+1853: [gpu] host import of 0x195b0dc0000+0x20000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195b0dc0000+0x20000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195b0dc0000+0x20000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget: 0 MiB live of 0 MiB (APS5_HOST_IMPORT_MIB); 1 imports (0 MiB) refused so far, 0 of them remembered, last 0x195bbb50000+0x30000 by build
+1853: [gpu] host import of 0x195bbb00000+0x60000 failed at vkAllocateMemory (-2); falling back to copies, requested by join
+1853: [gpu] host import budget lowered to the 0.0 MiB live after vkAllocateMemory failed within an eighth of the budget
+1853: [gpu] host import of 0x195bbb00000+0x60000 failed at vkAllocateMemory (-2); falling back to copies, requested by join
+1853: [gpu] host import budget lowered to the 0.0 MiB live after vkAllocateMemory failed within an eighth of the budget
+1853: [gpu] host import of 0x195be080000+0x20000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by map
+1853: [gpu] host import of 0x195be080000+0x20000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195be410000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2800000+0x800000 failed at vkAllocateMemory (-2); falling back to copies, requested by build
+1853: [gpu] host import of 0x195c2800000+0x800000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2750000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2770000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed 3 times in a row
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed within an eighth of the budget
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed 3 times in a row
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed within an eighth of the budget
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed 3 times in a row
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget lowered to the 0.1 MiB live after vkAllocateMemory failed within an eighth of the budget
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c26f0000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2710000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 4 MiB APS5_HOST_IMPORT_MIB sets; the setting stays, as the report never lowers it
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; the default stays until an import's vkAllocateMemory fails
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; imports are held to it since an import's vkAllocateMemory failed
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 4 MiB APS5_HOST_IMPORT_MIB sets; the setting stays, as the report never lowers it
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; the default stays until an import's vkAllocateMemory fails
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; imports are held to it since an import's vkAllocateMemory failed
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 4 MiB APS5_HOST_IMPORT_MIB sets; the setting stays, as the report never lowers it
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; the default stays until an import's vkAllocateMemory fails
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-1000072003); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; imports are held to it since an import's vkAllocateMemory failed
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 4 MiB APS5_HOST_IMPORT_MIB sets; the setting stays, as the report never lowers it
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; the default stays until an import's vkAllocateMemory fails
+1853: [gpu] host import of 0x195c2730000+0x10000 failed at vkAllocateMemory (-13); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; imports are held to it since an import's vkAllocateMemory failed
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; the default stays until an import's vkAllocateMemory fails
+1853: [gpu] host import of 0x195c26d0000+0x10000 failed at vkAllocateMemory (-2); falling back to copies, requested by access
+1853: [gpu] host import budget: host heap 1 reports a VK_EXT_memory_budget budget of 8 MiB and a usage of 8 MiB with 0 MiB of imports live, which leaves imports 0 MiB of the 7827 MiB of the default; imports are held to it since an import's vkAllocateMemory failed
+1853: [gpu] texture 0x61fddfc200 (format 74) has single DCC keys at 0x61fddfc040; its texels are read as stored
+1853: [gpu] texture 0x61fddfc200 (format 56) has mixed DCC keys at 0x61fddfc040; its texels are read as stored
+1853: [gpu] texture streaming feedback (LOD warning / mip statistics) is not reported
+1853: [gpu] texture 0x27c000000 (format 22) has unreadable DCC keys at 0x91b002040000; its texels are read as stored
+1853: [gpu] texture DCC color transform is ignored (word6=0x01980000 word7=0x00000000)
+1853: [gpu] depth plane 0xa0000000+0x40000 was unmapped with GPU results pending; they are dropped
+1853: content-key count=0 data=0 movable=0 words=70 capacity=70 hash=12276112778106431680
+1853: content-key count=0 data=0 movable=1 words=70 capacity=70 hash=16547703523611771548
+1853: content-key count=0 data=1 movable=0 words=327 capacity=327 hash=18195637788575597601
+1853: content-key count=0 data=1 movable=1 words=70 capacity=70 hash=6884676608767608045
+1853: content-key count=1 data=0 movable=0 words=90 capacity=90 hash=11922860723241892867
+1853: content-key count=1 data=0 movable=1 words=90 capacity=90 hash=13003334439161599255
+1853: content-key count=1 data=1 movable=0 words=347 capacity=347 hash=4632824790231828900
+1853: content-key count=1 data=1 movable=1 words=90 capacity=90 hash=3224044570976798586
+1853: content-key count=31 data=0 movable=0 words=420 capacity=420 hash=6830576982727691041
+1853: content-key count=31 data=0 movable=1 words=420 capacity=420 hash=2280208301785043997
+1853: content-key count=31 data=1 movable=0 words=677 capacity=677 hash=6456117746250735314
+1853: content-key count=31 data=1 movable=1 words=420 capacity=420 hash=8367048448298527228
+1853: content-key count=32 data=0 movable=0 words=431 capacity=431 hash=15731720179759167323
+1853: content-key count=32 data=0 movable=1 words=431 capacity=431 hash=13262112547932030959
+1853: content-key count=32 data=1 movable=0 words=688 capacity=688 hash=17268883745844277510
+1853: content-key count=32 data=1 movable=1 words=431 capacity=431 hash=14454635148885418384
+1853: content-key count=33 data=0 movable=0 words=451 capacity=451 hash=6068830097389659399
+1853: content-key count=33 data=0 movable=1 words=451 capacity=451 hash=16182941524346032243
+1853: content-key count=33 data=1 movable=0 words=708 capacity=708 hash=6902637059766015166
+1853: content-key count=33 data=1 movable=1 words=451 capacity=451 hash=15368496539284088680
+1853: content-key count=16384 data=0 movable=0 words=184902 capacity=184902 hash=3551952409246330595
+1853: content-key count=16384 data=0 movable=1 words=184902 capacity=184902 hash=18162686861842596727
+1853: content-key count=16384 data=1 movable=0 words=185159 capacity=185159 hash=3971825829384440316
+1853: content-key count=16384 data=1 movable=1 words=184902 capacity=184902 hash=6840014316718135442
+1853: Unused stencil reference sample equivalence passed: 22 accepted states, 12 dependent countermodels
+1853: Stencil logic operations matched AND, OR, XOR and XNOR under the write mask for 310 register states
+1853: All 256 MSAA CMASK byte classifications passed
+1853: EQAA color target decode checks passed
+1853: Graphics validation tests passed
+ 8/22 Test #1853: agc_driver_graphics ...............................   Passed   28.59 sec
+test 1854
+      Start 1854: agc_sparse_buffer_holes
+
+1854: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--sparse-buffer-holes"
+1854: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1854: Environment variables: 
+1854:  APS5_NO_PIPELINE_JOURNAL=1
+1854: Environment variable modifications: 
+1854:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1854: Test timeout computed to be: 30
+1854: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1854: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1854: sparse buffer holes: readable interior passed
+1854: sparse buffer holes: readable shortened passed
+1854: sparse buffer holes: readable committed passed
+1854: sparse buffer holes: writable interior passed
+1854: sparse buffer holes: writable shortened passed
+1854: sparse buffer holes: writable committed passed
+1854: sparse buffer hole tests passed
+ 9/22 Test #1854: agc_sparse_buffer_holes ...........................   Passed    0.04 sec
+test 1866
+      Start 1866: agc_heap_mirror_unwatch
+
+1866: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--heap-mirror-unwatch"
+1866: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1866: Environment variables: 
+1866:  APS5_NO_PIPELINE_JOURNAL=1
+1866: Environment variable modifications: 
+1866:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1866: Test timeout computed to be: 30
+1866: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1866: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1866: [gpu] host import budget: 1 MiB live of 3 MiB (APS5_HOST_IMPORT_MIB); 1 imports (2 MiB) refused so far, 0 of them remembered, last 0x200000000+0x200000 by build
+1866: an address-based build keeps and refreshes a refused heap's mirror once its range has left the write watch, and imports the heap once the budget holds it
+10/22 Test #1866: agc_heap_mirror_unwatch ...........................   Passed    0.05 sec
+test 1867
+      Start 1867: agc_heap_mirror_unwatch_no_space_cache
+
+1867: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--heap-mirror-unwatch"
+1867: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1867: Environment variables: 
+1867:  APS5_NO_ADDRESS_SPACE_CACHE=1
+1867:  APS5_NO_PIPELINE_JOURNAL=1
+1867: Environment variable modifications: 
+1867:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1867: Test timeout computed to be: 30
+1867: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1867: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1867: [gpu] host import budget: 1 MiB live of 3 MiB (APS5_HOST_IMPORT_MIB); 1 imports (2 MiB) refused so far, 0 of them remembered, last 0x200000000+0x200000 by build
+1867: an address-based build keeps and refreshes a refused heap's mirror once its range has left the write watch, and imports the heap once the budget holds it
+11/22 Test #1867: agc_heap_mirror_unwatch_no_space_cache ............   Passed    0.04 sec
+test 1868
+      Start 1868: agc_sparse_heap_mirror_unwatch
+
+1868: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--sparse-heap-mirror-unwatch"
+1868: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1868: Environment variables: 
+1868:  APS5_NO_PIPELINE_JOURNAL=1
+1868: Environment variable modifications: 
+1868:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1868: Test timeout computed to be: 30
+1868: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1868: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1868: an address-based build keeps and refreshes a sparse heap's mirror once its range has left the write watch
+12/22 Test #1868: agc_sparse_heap_mirror_unwatch ....................   Passed    0.05 sec
+test 1869
+      Start 1869: agc_sparse_heap_mirror_unwatch_no_space_cache
+
+1869: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--sparse-heap-mirror-unwatch"
+1869: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1869: Environment variables: 
+1869:  APS5_NO_ADDRESS_SPACE_CACHE=1
+1869:  APS5_NO_PIPELINE_JOURNAL=1
+1869: Environment variable modifications: 
+1869:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1869: Test timeout computed to be: 30
+1869: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1869: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1869: an address-based build keeps and refreshes a sparse heap's mirror once its range has left the write watch
+13/22 Test #1869: agc_sparse_heap_mirror_unwatch_no_space_cache .....   Passed    0.04 sec
+test 1870
+      Start 1870: agc_sparse_heap_mirror_budget
+
+1870: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--sparse-heap-mirror-budget"
+1870: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1870: Environment variables: 
+1870:  APS5_NO_PIPELINE_JOURNAL=1
+1870: Environment variable modifications: 
+1870:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1870: Test timeout computed to be: 30
+1870: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1870: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1870: [gpu] AGC graphics: heap mirror of 0x200000000+0x800000: past the budget; heap mirrors hold 0 MiB of 4 MiB (APS5_HEAP_MIRROR_MIB); copying the sparse heap instead
+1870: a sparse heap whose mirror would pass the heap mirror budget is copied
+14/22 Test #1870: agc_sparse_heap_mirror_budget .....................   Passed    0.06 sec
+test 1871
+      Start 1871: agc_heap_mirror_reference_size
+
+1871: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--heap-mirror-reference-size"
+1871: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1871: Environment variables: 
+1871:  APS5_NO_PIPELINE_JOURNAL=1
+1871: Environment variable modifications: 
+1871:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1871: Test timeout computed to be: 30
+1871: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1871: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1871: a writable heap mirror writes back a smaller range after a larger one
+15/22 Test #1871: agc_heap_mirror_reference_size ....................   Passed    0.04 sec
+test 1872
+      Start 1872: agc_heap_mirror_run_unwatch
+
+1872: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--heap-mirror-run-unwatch"
+1872: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1872: Environment variables: 
+1872:  APS5_NO_PIPELINE_JOURNAL=1
+1872: Environment variable modifications: 
+1872:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1872: Test timeout computed to be: 30
+1872: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1872: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1872: an address-based build refreshes the unwatched heap of a run in full and its watched neighbour by its writes
+16/22 Test #1872: agc_heap_mirror_run_unwatch .......................   Passed    0.05 sec
+test 1873
+      Start 1873: agc_heap_mirror_run_unwatch_no_space_cache
+
+1873: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--heap-mirror-run-unwatch"
+1873: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1873: Environment variables: 
+1873:  APS5_NO_ADDRESS_SPACE_CACHE=1
+1873:  APS5_NO_PIPELINE_JOURNAL=1
+1873: Environment variable modifications: 
+1873:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1873: Test timeout computed to be: 30
+1873: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1873: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1873: an address-based build refreshes the unwatched heap of a run in full and its watched neighbour by its writes
+17/22 Test #1873: agc_heap_mirror_run_unwatch_no_space_cache ........   Passed    0.05 sec
+test 1874
+      Start 1874: agc_address_copy_cap
+
+1874: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--address-copy-cap"
+1874: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1874: Environment variables: 
+1874:  APS5_NO_PIPELINE_JOURNAL=1
+1874: Environment variable modifications: 
+1874:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1874: Test timeout computed to be: 30
+1874: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1874: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1874: [gpu] host import budget: 1 MiB live of 3 MiB (APS5_HOST_IMPORT_MIB); 1 imports (2 MiB) refused so far, 0 of them remembered, last 0x200000000+0x200000 by build
+1874: [gpu] host import budget: 0x200000000+0x200000 imported by evicting idle imports, as copying it would pass APS5_ADDRESS_COPY_MAX_MIB
+1874: an address-based build serves a partly unwatched heap whose import is over the budget
+1874: an address-based build serves a partly unwatched heap whose import is over the budget
+1874: an address-based build serves a partly unwatched heap whose import is over the budget
+18/22 Test #1874: agc_address_copy_cap ..............................   Passed    0.05 sec
+test 1875
+      Start 1875: agc_address_copy_cap_remembered
+
+1875: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--address-copy-cap-remembered"
+1875: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1875: Environment variables: 
+1875:  APS5_NO_PIPELINE_JOURNAL=1
+1875: Environment variable modifications: 
+1875:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1875: Test timeout computed to be: 30
+1875: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1875: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1875: [gpu] host import budget: 1 MiB live of 3 MiB (APS5_HOST_IMPORT_MIB); 1 imports (2 MiB) refused so far, 0 of them remembered, last 0x200000000+0x200000 by build
+1875: [gpu] host import budget: 0x200000000+0x200000 imported by evicting idle imports, as copying it would pass APS5_ADDRESS_COPY_MAX_MIB
+1875: an address-based build answered from a remembered budget refusal evicts instead of copying a partly unwatched heap past the cap
+1875: an address-based build answered from a remembered budget refusal evicts instead of copying a partly unwatched heap past the cap
+1875: an address-based build answered from a remembered budget refusal evicts instead of copying a partly unwatched heap past the cap
+19/22 Test #1875: agc_address_copy_cap_remembered ...................   Passed    0.05 sec
+test 1876
+      Start 1876: agc_address_copy_cap_mirror
+
+1876: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--address-copy-cap-mirror"
+1876: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1876: Environment variables: 
+1876:  APS5_NO_PIPELINE_JOURNAL=1
+1876: Environment variable modifications: 
+1876:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1876: Test timeout computed to be: 30
+1876: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1876: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1876: [gpu] host import budget: 1 MiB live of 2 MiB (APS5_HOST_IMPORT_MIB); 1 imports (2 MiB) refused so far, 0 of them remembered, last 0x200000000+0x200000 by build
+1876: [gpu] host import budget: 0x200000000+0x200000 imported by evicting idle imports, as copying it would pass APS5_ADDRESS_COPY_MAX_MIB
+1876: an address-based build past the copy cap takes a range only an import serves from a recently used import a mirror stands in for
+1876: an address-based build past the copy cap takes a range only an import serves from a recently used import a mirror stands in for
+1876: an address-based build past the copy cap takes a range only an import serves from a recently used import a mirror stands in for
+20/22 Test #1876: agc_address_copy_cap_mirror .......................   Passed    0.05 sec
+test 1877
+      Start 1877: agc_address_space_unwatched_mirror_import
+
+1877: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--unwatched-mirror-import"
+1877: Working Directory: C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/prx/libSceAgcDriver
+1877: Environment variables: 
+1877:  APS5_NO_PIPELINE_JOURNAL=1
+1877: Environment variable modifications: 
+1877:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1877: Test timeout computed to be: 30
+1877: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1877: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1877: [gpu] host import budget: 1 MiB live of 1 MiB (APS5_HOST_IMPORT_MIB); 1 imports (1 MiB) refused so far, 0 of them remembered, last 0x200000000+0x100000 by build
+1877: a heap whose mirror left the write watch is imported in place of an import a mirror can replace
+1877: a heap whose mirror left the write watch is imported in place of an import a mirror can replace
+1877: a heap whose mirror left the write watch is imported in place of an import a mirror can replace
+21/22 Test #1877: agc_address_space_unwatched_mirror_import .........   Passed    0.05 sec
+test 1895
+      Start 1895: agc_driver_address_space_teardown
+
+1895: Test command: C:\anyps5\anyps5-main\.ai-work\builds\upstream\tests\agc_driver_graphics_tests.exe "--address-space-teardown"
+1895: Working Directory: C:/anyps5/anyps5-main/.ai-work/upstream
+1895: Environment variables: 
+1895:  ANYPS5_NO_SHADER_CACHE=1
+1895:  APS5_NO_PIPELINE_JOURNAL=1
+1895: Environment variable modifications: 
+1895:  PATH=path_list_prepend:C:/anyps5/anyps5-main/.ai-work/builds/upstream/core/libs/libs/unpatched
+1895: Test timeout computed to be: 10000000
+1895: [time] scheduler tick raised to 0.5 ms (was 0.50 ms, now 0.50 ms, timed waits fine)
+1895: [src/HostCpu.cpp:220 operator()] host CPU AMD Ryzen 7 7840HS w/ Radeon 780M Graphics: has SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, LZCNT, BMI1, BMI2, MOVBE, CMPXCHG16B, LAHF/SAHF, AVX, AVX2, FMA, F16C, AES, PCLMULQDQ, RDRAND, RDSEED, ADX, SHA, CLFLUSHOPT, CLWB, RDPID, XSAVEOPT, XSAVEC, SSE4A, PREFETCHW, CLZERO, OS AVX state (XCR0); lacks none
+1895: address-space device teardown releases cached guest allocations
+22/22 Test #1895: agc_driver_address_space_teardown .................   Passed    0.08 sec
+
+The following tests passed:
+	agc_driver_address_draw_space_reuse
+	agc_driver_host_import_windows
+	agc_driver_resident_heap_mirror
+	agc_driver_address_draw_space_reuse_off
+	agc_driver_address_draw_space_reuse_transitions
+	agc_driver_address_draw_space_reuse_verify
+	agc_driver_address_draw_space_reuse_held
+	agc_driver_graphics
+	agc_sparse_buffer_holes
+	agc_heap_mirror_unwatch
+	agc_heap_mirror_unwatch_no_space_cache
+	agc_sparse_heap_mirror_unwatch
+	agc_sparse_heap_mirror_unwatch_no_space_cache
+	agc_sparse_heap_mirror_budget
+	agc_heap_mirror_reference_size
+	agc_heap_mirror_run_unwatch
+	agc_heap_mirror_run_unwatch_no_space_cache
+	agc_address_copy_cap
+	agc_address_copy_cap_remembered
+	agc_address_copy_cap_mirror
+	agc_address_space_unwatched_mirror_import
+	agc_driver_address_space_teardown
+
+100% tests passed, 0 tests failed out of 22
+
+Total Test time (real) =  45.43 sec
+ctest exit=0

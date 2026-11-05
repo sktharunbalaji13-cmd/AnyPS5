@@ -1,0 +1,59 @@
+**seconds 60:25** from present 410: 105 presents, frame p50 171.4 / p90 334.9 / p99 799.9 / max 5300.8 ms, GPU busy 56.6 ms per present
+NVIDIA GeForce RTX 4060 Laptop GPU, NVIDIA 617.42, Windows 10.0.26200, 3840x2160, commit f3222bb7c416, dropped: no
+
+```json
+{"commit":"f3222bb7c416","dirty":false,"env":{"APS5_PROFILE_DRAW":"1","APS5_SKIP_REFUSED_DRAWS":"1","APS5_SOFT_DEPTH_CHECKS":"1","APS5_TRACE_SECONDS":"60:25"},"gpu":"NVIDIA GeForce RTX 4060 Laptop GPU","driver":"NVIDIA 617.42","os":"Windows 10.0.26200","cpu":"AMD Ryzen 7 7840HS w/ Radeon 780M Graphics","cpu_threads":16,"memory_mib":15654,"title_id":"PPSA02225","title":"Ghost of Tsushima","content_version":"02.024.000","resolution":"3840x2160","window":{"spec":"seconds 60:25","first_present":410,"ms":25083.217},"presents":105,"frame_ms":{"p50":171.424,"p90":334.875,"p99":799.943,"max":5300.815},"gpu_busy_ms_per_present":56.56,"worker_busy_pct":{"queue worker 0x0":62.028,"queue worker 0x40":57.834,"queue worker 0x20":89.569,"queue worker 0x48":81.892,"queue worker 0x38":0.0,"queue worker 0x52":0.0,"queue worker 0x30":0.0},"top_phases_ms_per_frame":{"Driver.Packet":686.847,"Driver.Packet.dispatch":422.555,"Driver.Dispatch":395.098,"Vulkan.Dispatch":196.354,"Vulkan.Dispatch.shader_resources":191.891,"GpuMutex.wait.dispatch":182.028,"Driver.Packet.memory_wait":130.595,"GpuMutex.wait.flush":70.036},"trace_dropped":false,"trace":"C3b-60-25-aps5-trace.json.gz"}
+```
+
+**Slowest frames** (largest slices inside each, inclusive)
+
+- present 481: 5300.8 ms at 12980 ms: Driver.Packet (queue worker 0x20) 5286.9, Driver.Packet (queue worker 0x40) 5262.7, Driver.Packet.dispatch (queue worker 0x40) 5262.6, Driver.Dispatch (queue worker 0x40) 5262.4
+- present 483: 799.9 ms at 18860 ms: Driver.Packet (queue worker 0x48) 766.6, Driver.Packet.dispatch (queue worker 0x48) 765.8, Driver.Dispatch (queue worker 0x48) 765.6, Vulkan.Dispatch (queue worker 0x48) 756.7
+- present 482: 579.3 ms at 18281 ms: Driver.WorkerWait (queue worker 0x0) 567.1, Driver.WorkerWait.idle_and_completion_poll (queue worker 0x0) 566.8, Driver.Packet (queue worker 0x20) 505.5, VideoOut.Flip (presenter) 408.2
+- present 486: 506.0 ms at 19970 ms: Driver.Packet (queue worker 0x20) 473.4, Driver.Packet (queue worker 0x40) 454.8, Driver.Packet.dispatch (queue worker 0x40) 454.5, Driver.Dispatch (queue worker 0x40) 454.2
+- present 463: 453.0 ms at 9048 ms: Driver.Packet (queue worker 0x0) 416.5, Driver.Packet.dispatch (queue worker 0x0) 410.7, Driver.Packet (queue worker 0x20) 361.6, Driver.Packet (queue worker 0x40) 340.5
+
+**Persistent spikes** (frame time above the fastest frame that separates it from a longer frame; one entry per stall, not per frame)
+
+- present 481: 5300.8 ms at 12980 ms, persistence 5274.0 ms
+- present 486: 506.0 ms at 19970 ms, persistence 435.2 ms
+- present 463: 453.0 ms at 9048 ms, persistence 418.6 ms
+- present 455: 429.5 ms at 7185 ms, persistence 378.1 ms
+- present 467: 415.4 ms at 9900 ms, persistence 376.6 ms
+
+**Threads** (ms per frame)
+
+| thread | busy | wait | untraced | in slices < 20 us | largest |
+|---|---|---|---|---|---|
+| title | 0.3 (0 %) | 1.4 (1 %) | 237.1 | 0.1 | Shader.Register 0.1, Shader.ResolveAbi 0.1 |
+| shader prepare | 0.1 (0 %) | 0.0 (0 %) | 238.8 | 0.0 | Vulkan.GraphicsPipelinePrebuild 0.1 |
+| queue worker 0x0 | 74.8 (31 %) | 163.2 (68 %) | 1.0 | 1.3 | Driver.Packet 143.7, Driver.EndSubmission 4.0 |
+| queue worker 0x40 | 14.9 (6 %) | 164.6 (69 %) | 59.5 | 1.2 | Driver.Packet 135.9, Driver.EndSubmission 2.1 |
+| queue worker 0x20 | 33.6 (14 %) | 201.7 (84 %) | 3.6 | 5.0 | Driver.Packet 209.1, Driver.EndSubmission 1.9 |
+| draw committer | 5.7 (2 %) | 82.3 (34 %) | 150.8 | 0.2 | Graphics.Draw 3.4, Recorder.Sync 1.2 |
+| queue worker 0x48 | 183.7 (77 %) | 54.7 (23 %) | 0.5 | 0.6 | Driver.Packet 194.6, Driver.EndSubmission 0.9 |
+| presenter | 3.1 (1 %) | 32.1 (13 %) | 203.6 | 0.1 | VideoOut.Flip 35.2, Driver.Present 0.1 |
+| title | 0.0 (0 %) | 0.0 (0 %) | 238.9 | 0.0 | Shader.ResolveGraphicsStagesAbi 0.0, Shader.ResolveAbi 0.0 |
+| title | 0.0 (0 %) | 0.0 (0 %) | 238.9 | 0.0 | Shader.ResolveGraphicsStagesAbi 0.0 |
+| title | 0.0 (0 %) | 0.0 (0 %) | 238.9 | 0.0 | Shader.ResolveGraphicsStagesAbi 0.0, Shader.ResolveAbi 0.0 |
+| title | 0.0 (0 %) | 0.0 (0 %) | 238.9 | 0.0 | Shader.ResolveGraphicsStagesAbi 0.0, Shader.ResolveAbi 0.0 |
+| title | 0.0 (0 %) | 0.0 (0 %) | 238.9 | 0.0 | Shader.ResolveGraphicsStagesAbi 0.0, Shader.ResolveAbi 0.0 |
+| gpu | 56.3 (24 %) | 0.0 (0 %) | 182.6 | 0.0 | batch 56.3 |
+
+**Largest slices** (ms per frame, inclusive, all threads): Driver.Packet 683.4, Driver.Packet.dispatch 422.5, Driver.Dispatch 394.9, Driver.WorkerWait 198.7, Driver.WorkerWait.idle_and_completion_poll 197.0
+
+**Longest waits**
+
+- Driver.Packet.memory_wait (queue worker 0x20) 5467.4 ms at 13212 ms, present 481
+- GpuMutex.wait.flush (queue worker 0x0) 5060.9 ms at 13216 ms, present 481
+- GpuMutex.wait.dispatch (queue worker 0x40) 5059.7 ms at 13216 ms, present 481
+- Driver.WorkerWait (queue worker 0x0) 661.3 ms at 18860 ms, present 482
+- Driver.WorkerWait (queue worker 0x0) 567.9 ms at 18280 ms, present 481
+
+**Largest GPU batches** (GPU ranges inside, and the CPU slices that recorded each, inclusive)
+
+- batch 2129: 369.2 ms at 18280 ms, present 481: GPU no ranges; recorded by Driver.Packet (queue worker 0x48) 5060.0, Driver.Packet.dispatch (queue worker 0x48) 5060.0, Driver.Dispatch (queue worker 0x48) 5059.9, Vulkan.Dispatch (queue worker 0x48) 5059.7
+- batch 2128: 104.3 ms at 17806 ms, present 481: GPU no ranges; recorded by Recorder.Sync (queue worker 0x48) 105.7, Recorder.Submit (queue worker 0x48) 0.6, Resources.Prepare (queue worker 0x48) 0.4
+- batch 1997: 49.3 ms at 12336 ms, present 476: GPU no ranges; recorded by Recorder.Sync (queue worker 0x48) 49.5, Resources.Prepare (queue worker 0x48) 0.1, Recorder.Submit (queue worker 0x48) 0.1
+- batch 1981: 33.2 ms at 12230 ms, present 476: GPU no ranges; recorded by Driver.Packet (queue worker 0x20) 6.2, Driver.Packet.dispatch (queue worker 0x20) 6.0, Driver.Dispatch (queue worker 0x20) 4.2, Vulkan.Dispatch (queue worker 0x20) 2.8
+- batch 318: 22.3 ms at 2022 ms, present 422: GPU no ranges; recorded by Recorder.Sync (queue worker 0x48) 22.7, Recorder.Submit (queue worker 0x48) 0.1, Resources.Prepare (queue worker 0x48) 0.1
