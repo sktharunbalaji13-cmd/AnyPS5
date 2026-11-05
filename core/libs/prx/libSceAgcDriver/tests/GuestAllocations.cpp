@@ -150,6 +150,37 @@ void leaseSnapshotTests() {
     mutation.Remove(memory.data() + 64);
 }
 
+void generationChangeTests() {
+    const auto unchanged = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    { GuestAllocations::Mutation mutation; }
+    Require(GuestAllocations::GuestAllocationsGeneration_nid_postfix() == unchanged, "an empty guest allocation mutation advanced the generation");
+    std::array<std::byte, 128> memory{};
+    const auto beforeAdd = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.data(), memory.size(), true, true, false);
+    }
+    const auto afterAdd = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    Require(afterAdd != beforeAdd, "adding a guest allocation kept the generation");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Remove(memory.data());
+    }
+    const auto afterRemove = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    Require(afterRemove != afterAdd, "removing a guest allocation kept the generation");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.data(), 0, true, true, false);
+    }
+    const auto afterEmptyAdd = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    Require(afterEmptyAdd != afterRemove, "adding an empty guest allocation kept the generation");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Remove(memory.data());
+    }
+    Require(GuestAllocations::GuestAllocationsGeneration_nid_postfix() != afterEmptyAdd, "removing an empty guest allocation kept the generation");
+}
+
 }
 
 void RunGuestLeaseWaitTests() {
@@ -201,6 +232,7 @@ void RunGuestLeaseWaitTests() {
 
 void RunGuestAllocationTests() {
     leaseSnapshotTests();
+    generationChangeTests();
     void* pointer = GuestHeap::GuestHeapAllocate_nid_postfix(32);
     Require(reinterpret_cast<std::uintptr_t>(pointer) % alignof(std::max_align_t) == 0, "guest malloc is not suitably aligned");
     std::memset(pointer, 0x55, 32);

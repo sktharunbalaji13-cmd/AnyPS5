@@ -105,10 +105,14 @@ struct MutationState {
     std::vector<std::pair<std::uintptr_t, std::size_t>> changed;
     std::vector<std::pair<std::uintptr_t, std::size_t>> gpuMapped;
     std::vector<std::pair<std::uintptr_t, std::size_t>> unpinned;
+    bool modified = false;
 };
 
 void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
-    if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+    if (mutation == nullptr) return;
+    auto* state = static_cast<MutationState*>(mutation);
+    state->modified = true;
+    if (bytes != 0) state->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 }
 
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -167,7 +171,8 @@ void* GuestAllocationsBegin_nid_postfix() {
 void GuestAllocationsEnd_nid_postfix(void* mutation) noexcept {
     auto* state = static_cast<MutationState*>(mutation);
     for (const auto& [address, bytes] : state->unpinned) renewBacking(address, bytes);
-    const auto ended = generation.fetch_add(1, std::memory_order_release) + 1;
+    const bool changedAny = state->modified || !state->unpinned.empty() || !state->gpuMapped.empty();
+    const auto ended = changedAny ? generation.fetch_add(1, std::memory_order_release) + 1 : generation.load(std::memory_order_acquire);
     if (const auto callback = invalidator.load(std::memory_order_acquire)) {
         for (const auto& [address, bytes] : state->changed) callback(address, bytes);
     }
@@ -260,17 +265,19 @@ void registerImage(const void* image) {
 }
 }
 
-void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
+void GuestAllocationsRegisterMainImage_nid_postfix(void* mutation) {
     auto& state = registry();
     if (state.mainImageRegistered) return;
+    if (mutation != nullptr) static_cast<MutationState*>(mutation)->modified = true;
     const auto image = GetModuleHandleW(nullptr);
     require(image != nullptr, "cannot locate the main guest image");
     registerImage(image);
     state.mainImageRegistered = true;
 }
 
-void GuestAllocationsRegisterImage_nid_postfix(void*, const void* image) {
+void GuestAllocationsRegisterImage_nid_postfix(void* mutation, const void* image) {
     require(image != nullptr, "cannot register a guest image without a base");
+    if (mutation != nullptr) static_cast<MutationState*>(mutation)->modified = true;
     registerImage(image);
 }
 
@@ -363,9 +370,10 @@ std::uintptr_t registerImagePages(const ImagePages& collected) {
 }
 }
 
-void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
+void GuestAllocationsRegisterMainImage_nid_postfix(void* mutation) {
     auto& state = registry();
     if (state.mainImageRegistered) return;
+    if (mutation != nullptr) static_cast<MutationState*>(mutation)->modified = true;
     ImagePages collected{.main = true, .pageSize = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE))};
 #ifdef __APPLE__
     collectMachImagePages(collected);
@@ -377,8 +385,9 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     state.mainImageRegistered = true;
 }
 
-void GuestAllocationsRegisterImage_nid_postfix(void*, const void* image) {
+void GuestAllocationsRegisterImage_nid_postfix(void* mutation, const void* image) {
     require(image != nullptr, "cannot register a guest image without a base");
+    if (mutation != nullptr) static_cast<MutationState*>(mutation)->modified = true;
     auto& state = registry();
     const auto base = reinterpret_cast<std::uintptr_t>(image);
     if (state.registeredImages.contains(base)) return;
