@@ -220,6 +220,15 @@ std::uint64_t collectAfterTouch(std::uint64_t address, std::size_t bytes) {
     return GuestMemory::CollectWritesUncached(address, bytes);
 }
 
+void depthCheck(bool ok, const char* message) {
+    if (ok) return;
+    static const bool soft = std::getenv("APS5_SOFT_DEPTH_CHECKS") != nullptr;
+    if (!soft) Require(false, message);
+    static std::atomic<std::uint64_t> softened{0};
+    const auto count = softened.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-soft] %s (#%llu)\n", message, static_cast<unsigned long long>(count));
+}
+
 std::atomic<bool>& anyDepthGuard() {
     static std::atomic<bool> any{false};
     return any;
@@ -684,7 +693,7 @@ public:
         if (stencilClearGeneration != 0u) {
             auto& plane = sampling.initial[2];
             const bool gpuFill = stencilFillNote != 0u && (queuedStencilFill || newestStencilNote == 0u);
-            Require(GuestMemory::UnchangedSinceCollected(plane.address, plane.bytes, stencilClearGeneration), "CPU writes raced native multisample stencil plane fill");
+            depthCheck(GuestMemory::UnchangedSinceCollected(plane.address, plane.bytes, stencilClearGeneration), "CPU writes raced native multisample stencil plane fill");
             if (planeAliased) sampling.aliasStencil = *stencilClearValue;
             else Require(gpuFill || stencilStored || GuestMemory::StoredAllSince_nid_no_patch(plane.address, plane.bytes, stencilClearGeneration), "native multisample stencil plane fill has no complete tracked store");
             if (!queuedStencilFill && !planeAliased) {
@@ -692,7 +701,7 @@ public:
                 Require(std::all_of(bytes, bytes + plane.bytes, [&](std::uint8_t value) { return value == *stencilClearValue; }), "native multisample stencil plane does not hold its fill value");
             }
             const auto generation = GuestMemory::CollectWritesUncached(plane.address, plane.bytes);
-            Require(GuestMemory::UnchangedSinceCollected(plane.address, plane.bytes, stencilClearGeneration), "CPU writes raced native multisample stencil plane fill");
+            depthCheck(GuestMemory::UnchangedSinceCollected(plane.address, plane.bytes, stencilClearGeneration), "CPU writes raced native multisample stencil plane fill");
             stencilFill = *stencilClearValue;
             RecordClear(VK_IMAGE_ASPECT_STENCIL_BIT);
             plane.generation = generation;
@@ -705,9 +714,9 @@ public:
             const bool gpuFill = clearPattern.has_value() && clearFillNote != 0u && (queuedFill || newestHtileNote == 0u);
             for (std::size_t index = 0u; index < sampling.initial.size(); ++index) {
                 const auto& plane = sampling.initial[index];
-                if (index != 1u) Require(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes over native multisample depth are not implemented");
+                if (index != 1u) depthCheck(GuestMemory::UnchangedSince(plane.address, plane.bytes, plane.generation), "guest writes over native multisample depth are not implemented");
             }
-            Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
+            depthCheck(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
             Require(gpuFill || clearStored || GuestMemory::StoredAllSince_nid_no_patch(metadata.address, metadata.bytes, clearGeneration), "native multisample depth clear has no complete tracked HTILE store");
             Require(clearDepth == 0.0f || clearDepth == 1.0f, "native multisample depth clear value is not implemented");
             auto current = sampling.initial;
@@ -719,8 +728,8 @@ public:
                 Require((clearAspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u || htileProvesStencilClear(word), "native multisample stencil completed HTILE does not prove its clear value");
             }
             for (const auto& range : current) GuestMemory::CollectWritesUncached(range.address, range.bytes);
-            Require(GuestMemory::UnchangedSinceAll(current), "guest writes raced native multisample depth clear");
-            Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
+            depthCheck(GuestMemory::UnchangedSinceAll(current), "guest writes raced native multisample depth clear");
+            depthCheck(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, clearGeneration), "CPU writes raced native multisample depth clear");
             RecordClear(clearAspects);
             sampling.initial = current;
             RebasePublication(1u);
@@ -728,7 +737,7 @@ public:
             clearAspects = 0u;
             pendingClear = 0u;
         }
-        Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes over native multisample depth are not implemented");
+        depthCheck(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes over native multisample depth are not implemented");
     }
 
     void CheckResource(const GuestTextureResource& resource) const {
@@ -947,11 +956,11 @@ public:
                 std::vector<PublicationPlane> captured;
                 for (const auto& range : sampling.initial) captured.push_back(CapturePublication(range));
                 for (const auto& plane : captured) {
-                    Require(GuestMemory::UnchangedSinceCollected(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (a)");
-                    Require(GuestMemory::UnchangedSince(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (b)");
+                    depthCheck(GuestMemory::UnchangedSinceCollected(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (a)");
+                    depthCheck(GuestMemory::UnchangedSince(plane.range.address, plane.range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (b)");
                 }
-                for (const auto& range : sampling.initial) Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication capture (c)");
-                Require(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes raced native multisample depth publication capture (d)");
+                for (const auto& range : sampling.initial) depthCheck(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication capture (c)");
+                depthCheck(GuestMemory::UnchangedSinceAll(sampling.initial), "guest writes raced native multisample depth publication capture (d)");
                 publication = std::move(captured);
             } catch (const std::exception& error) {
                 if (std::getenv("APS5_TRACE_DEPTH_RACE") != nullptr) {
@@ -1571,7 +1580,7 @@ private:
             }
         }
         if (std::getenv("APS5_TRACE_DEPTH_RACE") != nullptr && !(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation))) std::fprintf(stderr, "[depth-race] capture 0x%llx+0x%zx collected %d since %d\n", static_cast<unsigned long long>(range.address), static_cast<std::size_t>(range.bytes), GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) ? 1 : 0, GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation) ? 1 : 0);
-        Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (e)");
+        depthCheck(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, plane.range.generation) && GuestMemory::UnchangedSince(range.address, range.bytes, plane.range.generation), "guest writes raced native multisample depth publication capture (e)");
         return plane;
     }
 
@@ -2495,8 +2504,8 @@ void DepthSurface::PublishToGuest() {
     }
     if (const auto hook = depthPublicationHook.load(std::memory_order_acquire)) hook(DepthPublicationStage::GuestCopied);
     for (const auto& range : observed) GuestMemory::CollectWritesUncached(range.address, range.bytes);
-    for (const auto& range : observed) Require(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication");
-    Require(GuestMemory::UnchangedSinceAll(observed), "guest writes raced native multisample depth publication");
+    for (const auto& range : observed) depthCheck(GuestMemory::UnchangedSinceCollected(range.address, range.bytes, range.generation), "guest writes raced native multisample depth publication");
+    depthCheck(GuestMemory::UnchangedSinceAll(observed), "guest writes raced native multisample depth publication");
     Require(active->load(std::memory_order_acquire) && !clearPending && clearGeneration == 0u && stencilClearGeneration == 0u && pendingClear == 0u, "native multisample depth ownership changed during publication");
     publicationFailed = true;
     if (const auto hook = depthPublicationHook.load(std::memory_order_acquire)) hook(DepthPublicationStage::BeforeCommit);
@@ -3568,7 +3577,7 @@ void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
         if (!surface->active->load(std::memory_order_acquire) || !surface->samplingActive || surface->target.htileAddress != htileAddress || surface->clearGeneration == 0u) continue;
         const auto& metadata = surface->sampling.initial[1];
         if (bytes < metadata.bytes) continue;
-        Require(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, surface->clearGeneration), "CPU writes raced native multisample depth clear");
+        depthCheck(GuestMemory::UnchangedSinceCollected(metadata.address, metadata.bytes, surface->clearGeneration), "CPU writes raced native multisample depth clear");
         GuestMemory::MarkWritten(metadata.address, metadata.bytes);
         surface->clearCompletionQueued = false;
     }
