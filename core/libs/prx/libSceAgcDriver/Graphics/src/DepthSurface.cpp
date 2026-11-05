@@ -1599,7 +1599,6 @@ private:
 
     void createSampleShadow() {
         VkImage image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
         try {
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
             info.imageType = VK_IMAGE_TYPE_2D;
@@ -1613,16 +1612,11 @@ private:
             info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &image), "vkCreateImage sampled depth shadow");
-            VkMemoryRequirements requirements{};
-            context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
-            VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            allocation.allocationSize = requirements.size;
-            allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            Check(MemoryAccounting::Allocate(context, allocation, "sampled depth shadow", &memory), "vkAllocateMemory sampled depth shadow");
-            Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory sampled depth shadow");
-            sampleShadow = std::make_shared<OwnedImage>(context, image, memory);
+            auto owned = std::make_shared<OwnedImage>(context, image, VK_NULL_HANDLE);
             image = VK_NULL_HANDLE;
-            memory = VK_NULL_HANDLE;
+            owned->Allocate(context, info, "vkAllocateMemory sampled depth shadow", true);
+            Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, owned->image, owned->allocation.Memory(), owned->allocation.Offset()), "vkBindImageMemory sampled depth shadow");
+            sampleShadow = std::move(owned);
             auto* recorder = RecorderFor(context);
             if (recorder != nullptr) recorder->Keep(sampleShadow);
             std::unique_ptr<CommandBatch> batch;
@@ -1641,7 +1635,6 @@ private:
             else Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
         } catch (...) {
             if (image != VK_NULL_HANDLE) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-            if (memory != VK_NULL_HANDLE) MemoryAccounting::Free(context, memory);
             throw;
         }
     }

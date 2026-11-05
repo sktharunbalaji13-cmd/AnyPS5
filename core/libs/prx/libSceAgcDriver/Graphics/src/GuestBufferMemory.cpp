@@ -4986,7 +4986,7 @@ void GuestBufferMemory::AcquireRegistered() {
                 imported.emplace_back(range->address, range->address + range->bytes);
                 continue;
             }
-            if (mirrorsEnabled() && !WasEvicted(range->address)) {
+            if (mirrorsEnabled() && (!WasEvicted(range->address) || copiedBytes + range->bytes > cap)) {
                 region.mirror = acquireMirror(context, range, blocks, range->releasable);
                 lap(timing.mirrorsUs, at);
                 if (region.mirror != nullptr) {
