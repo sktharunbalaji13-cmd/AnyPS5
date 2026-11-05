@@ -1537,6 +1537,7 @@ private:
     PublicationPlane CapturePublication(const GuestMemory::UnchangedQuery& range) {
         PublicationPlane plane;
         plane.range = range;
+        for (auto page = range.address & ~std::uint64_t{4095}; page < range.address + range.bytes; page += 4096u) static_cast<void>(*reinterpret_cast<const volatile std::uint8_t*>(std::max(page, range.address)));
         plane.range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
         const auto pages = (range.bytes + PublicationPlane::PageBytes - 1u) / PublicationPlane::PageBytes;
         plane.words.assign(pages, 0u);
