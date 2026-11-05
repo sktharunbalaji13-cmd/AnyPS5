@@ -2944,7 +2944,6 @@ struct RefreshBlock {
     std::size_t length;
     std::uint64_t generation = 0;
     std::uint8_t fill = 0;
-    mutable bool unchanged = false;
 };
 
 constexpr std::uint8_t SparseCopy = 1;
@@ -2960,14 +2959,8 @@ bool compareBlock(const RefreshBlock& block) {
             if (target != nullptr) std::memset(target, 0, block.length);
             return true;
         }
-        const auto index = static_cast<std::size_t>(block.address / 65536 - block.mirror->base / 65536);
-        if (target != nullptr && block.fill == 0 && std::memcmp(target, guest, block.length) == 0) {
-            block.mirror->generations[index] = block.generation;
-            block.unchanged = true;
-            return false;
-        }
         if (target != nullptr) std::memcpy(target, guest, block.length);
-        if (block.fill == 0) block.mirror->generations[index] = block.generation;
+        if (block.fill == 0) block.mirror->generations[static_cast<std::size_t>(block.address / 65536 - block.mirror->base / 65536)] = block.generation;
         return target != nullptr;
     }
     if (block.fill != 0) {
@@ -2977,12 +2970,9 @@ bool compareBlock(const RefreshBlock& block) {
         return true;
     }
     if (block.mirror->heap) {
-        const auto index = static_cast<std::size_t>(block.address / 65536 - block.mirror->base / 65536);
-        auto* target = block.mirror->buffer->Bytes().data() + offset;
-        const bool same = std::memcmp(target, guest, block.length) == 0;
-        if (!same) std::memcpy(target, guest, block.length);
-        block.mirror->generations[index] = block.generation;
-        return !same;
+        std::memcpy(block.mirror->buffer->Bytes().data() + offset, guest, block.length);
+        block.mirror->generations[static_cast<std::size_t>(block.address / 65536 - block.mirror->base / 65536)] = block.generation;
+        return true;
     }
     if (std::memcmp(block.mirror->shadow.data() + offset, guest, block.length) == 0) return false;
     std::memcpy(block.mirror->buffer->Bytes().data() + offset, guest, block.length);
@@ -3149,7 +3139,7 @@ void compareBlocks(std::span<const RefreshBlock> blocks) {
     bindHeapBlocks(blocks);
     const auto copied = RefreshPool::Get().Run(blocks);
     for (const auto& block : blocks) {
-        if (!block.unchanged && block.mirror->resident != nullptr && block.mirror->resident->Block(block.address) != nullptr) block.mirror->resident->MarkChanged(block.address, block.address + block.length);
+        if (block.mirror->resident != nullptr && block.mirror->resident->Block(block.address) != nullptr) block.mirror->resident->MarkChanged(block.address, block.address + block.length);
     }
     auto& state = Mirrors();
     state.blocksCompared += blocks.size();
