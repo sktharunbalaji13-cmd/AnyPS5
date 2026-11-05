@@ -3032,6 +3032,10 @@ void heapMirrorTests(const Context& context, const BdaTestAccess& access) {
     Require(build(0, {}) == first && MirrorCounters().heapChecks == quiet.heapChecks && MirrorCounters().sweeps == quiet.sweeps && MirrorCounters().blocksCopied == quiet.blocksCopied, "an unchanged heap range was compared block by block or the mirrors were swept again");
     guest[65536 + 9] = 0x66;
     Require(build(0, {}) == first && MirrorCounters().heapChecks > quiet.heapChecks && MirrorCounters().blocksCopied == quiet.blocksCopied + 1 && access.addressBytes(first)[65536 + 9] == std::byte{0x66}, "a CPU write after an unchanged build was missed");
+    const auto stamped = MirrorCounters();
+    AgcDriver::GuestMemory::MarkWritten(address + 65536 + 16, 16);
+    Require(build(0, {}) == first && MirrorCounters().heapRefills == stamped.heapRefills + 1 && MirrorCounters().blocksCopied == stamped.blocksCopied, "a block stamped without a byte change was copied into its mirror again");
+    Require(build(0, {}) == first && MirrorCounters().heapRefills == stamped.heapRefills + 1 && MirrorCounters().blocksCopied == stamped.blocksCopied, "a stamped block whose bytes matched its mirror was found changed again");
     registry(false, false);
     sweep();
     const auto swept = MirrorCounters();
