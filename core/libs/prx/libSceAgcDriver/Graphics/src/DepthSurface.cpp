@@ -220,10 +220,14 @@ std::uint64_t collectAfterTouch(std::uint64_t address, std::size_t bytes) {
     return GuestMemory::CollectWritesUncached(address, bytes);
 }
 
+bool softDepthChecks() {
+    static const bool soft = std::getenv("APS5_SOFT_DEPTH_CHECKS") != nullptr;
+    return soft;
+}
+
 void depthCheck(bool ok, const char* message) {
     if (ok) return;
-    static const bool soft = std::getenv("APS5_SOFT_DEPTH_CHECKS") != nullptr;
-    if (!soft) Require(false, message);
+    if (!softDepthChecks()) Require(false, message);
     static std::atomic<std::uint64_t> softened{0};
     const auto count = softened.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-soft] %s (#%llu)\n", message, static_cast<unsigned long long>(count));
@@ -2418,9 +2422,19 @@ void DepthSurface::PublishToGuest() {
     for (const auto& parts : live) {
         for (const auto& part : parts) {
             Require(GuestMemory::Accessible(reinterpret_cast<const void*>(part.address), part.bytes, true) && GuestMemory::Watched(part.address, part.bytes), "native multisample depth publication requires watched accessible guest memory");
-            Require(!MultisampleColorTargetOver(part.address, part.bytes), "native multisample depth publication over a resident colour target is not implemented");
             const std::pair<std::uint64_t, std::uint64_t> range{part.address, part.address + part.bytes};
-            Require(!StorageTexture::AnyPendingOverlaps(std::span(&range, 1u)), "native multisample depth publication over pending storage image writes is not implemented");
+            const bool overColour = MultisampleColorTargetOver(part.address, part.bytes).has_value();
+            const bool overStorage = !overColour && StorageTexture::AnyPendingOverlaps(std::span(&range, 1u));
+            if ((overColour || overStorage) && softDepthChecks()) {
+                static std::atomic<std::uint64_t> skipped{0};
+                const auto count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (count <= 40 || count % 100 == 0) std::fprintf(stderr, "[depth-soft] native multisample depth publication over %s skipped (#%llu)\n", overColour ? "a resident colour target" : "pending storage image writes", static_cast<unsigned long long>(count));
+                hostWritten->store(false, std::memory_order_release);
+                publication.clear();
+                return;
+            }
+            Require(!overColour, "native multisample depth publication over a resident colour target is not implemented");
+            Require(!overStorage, "native multisample depth publication over pending storage image writes is not implemented");
         }
     }
     for (const auto& parts : live) {
