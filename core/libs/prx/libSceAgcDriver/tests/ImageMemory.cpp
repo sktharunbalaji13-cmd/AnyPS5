@@ -401,6 +401,53 @@ void BoundaryRanges() {
     Clean();
 }
 
+void FailedFitsAreRemembered() {
+    ResetMock();
+    {
+        auto context = NewContext();
+        std::array<ImageSpec, 8> images{};
+        std::array<ImageAllocation, 8> allocations{};
+        for (std::size_t index = 0; index < images.size(); ++index) {
+            images[index] = NewImage(512 * KiB, 512 * KiB);
+            allocations[index] = Take(context, images[index]);
+            Bind(images[index], allocations[index]);
+        }
+        Expect(mock.allocations == 1, "eight aligned 512 KiB image ranges did not fill one 4 MiB block");
+        const auto firstMemory = MemoryOf(allocations[0]);
+        for (const std::size_t index : {1u, 3u, 5u}) Drop(images[index], allocations[index]);
+        const auto wide = NewImage(768 * KiB);
+        auto wideAllocation = Take(context, wide);
+        Bind(wide, wideAllocation);
+        Expect(mock.allocations == 2 && MemoryOf(wideAllocation) != firstMemory, "a range wider than every free hole did not take a block of its own");
+        std::vector<ImageSpec> fillers;
+        std::vector<ImageAllocation> fillerAllocations;
+        fillers.reserve(7);
+        fillerAllocations.reserve(7);
+        for (std::size_t index = 0; index < 7; ++index) {
+            fillers.push_back(NewImage(index < 6 ? 512 * KiB : 256 * KiB));
+            fillerAllocations.push_back(Take(context, fillers.back()));
+            Bind(fillers.back(), fillerAllocations.back());
+        }
+        Expect(mock.allocations == 2, "the second block did not hold the ranges that fill it");
+        const auto narrow = NewImage(512 * KiB);
+        auto narrowAllocation = Take(context, narrow);
+        Bind(narrow, narrowAllocation);
+        Expect(mock.allocations == 2 && MemoryOf(narrowAllocation) == firstMemory, "a range that fits a free hole was refused after a wider range did not fit the block");
+        Drop(images[2], allocations[2]);
+        Drop(images[4], allocations[4]);
+        const auto again = NewImage(768 * KiB);
+        auto againAllocation = Take(context, again);
+        Bind(again, againAllocation);
+        Expect(mock.allocations == 2 && MemoryOf(againAllocation) == firstMemory, "a range that did not fit a block was refused after the neighbours of its hole were released");
+        Drop(again, againAllocation);
+        Drop(narrow, narrowAllocation);
+        Drop(wide, wideAllocation);
+        for (std::size_t index = 0; index < fillers.size(); ++index) Drop(fillers[index], fillerAllocations[index]);
+        for (std::size_t index = 0; index < images.size(); ++index) Drop(images[index], allocations[index]);
+    }
+    Clean();
+}
+
 void UnboundAllocationRollback() {
     ResetMock();
     {
@@ -1096,6 +1143,7 @@ int main(int argc, char** argv) {
         std::puts("image allocation: variable and boundary ranges");
         VariableRanges();
         BoundaryRanges();
+        FailedFitsAreRemembered();
         BlockAlignmentFallback();
         UnboundAllocationRollback();
         std::puts("image allocation: types and dedicated requirements");

@@ -677,7 +677,21 @@ std::optional<std::uint32_t> BufferPool::imageRange(const ImageBlock& block, std
     return search(0, block.hint);
 }
 
+bool BufferPool::imageNoFit(const ImageBlock& block, std::uint32_t units, std::uint32_t alignment) noexcept {
+    return units >= block.noFitUnits && alignment % block.noFitAlignment == 0u;
+}
+
+void BufferPool::noteImageNoFit(ImageBlock& block, std::uint32_t units, std::uint32_t alignment) noexcept {
+    if (imageNoFit(block, units, alignment)) return;
+    block.noFitUnits = units;
+    block.noFitAlignment = alignment;
+}
+
 void BufferPool::markImageRange(ImageBlock& block, std::uint32_t first, std::uint32_t units, bool occupied) noexcept {
+    if (!occupied) {
+        block.noFitUnits = imageBlockUnits + 1u;
+        block.noFitAlignment = 1u;
+    }
     const auto end = first + units;
     for (auto position = first; position < end;) {
         const auto word = position / 64u;
@@ -711,8 +725,12 @@ ImageAllocation BufferPool::takeImageRange(const std::shared_ptr<BufferPool>& po
     const auto aligned = static_cast<std::uint32_t>(std::max(alignment, imageUnitBytes) / imageUnitBytes);
     std::lock_guard lock(imageMutex);
     for (auto* block = imageAvailable[memoryType]; block != nullptr; block = block->next) {
+        if (imageNoFit(*block, units, aligned)) continue;
         const auto first = imageRange(*block, units, aligned);
-        if (!first) continue;
+        if (!first) {
+            noteImageNoFit(*block, units, aligned);
+            continue;
+        }
         if (block->retained) {
             block->retained = false;
             retainedImageSlabBytes.fetch_sub(imageBlockBytes, std::memory_order_relaxed);

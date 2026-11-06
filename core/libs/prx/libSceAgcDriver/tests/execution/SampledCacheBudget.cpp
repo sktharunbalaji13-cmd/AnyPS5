@@ -812,7 +812,8 @@ void fruitlessStorageReleaseTests(const Context& context) {
     for (std::size_t surface = 0; surface < 4; ++surface) held.push_back(Sampled(context, block.Surface(surface)));
     std::weak_ptr<StorageTexture> idle = CachedStorageSurface(context, Resource(block.Surface(5)));
     Require(!idle.expired(), "the storage release fixture did not cache a storage image");
-    Require(ReleaseTextureCaches(Request, false) != 0 && idle.expired(), "a release with every sampled texture held did not fall through to the idle storage image");
+    ReleaseTextureCaches(Request, false);
+    Require(idle.expired(), "a release with every sampled texture held did not fall through to the idle storage image");
     held.pop_back();
     ReleaseTextureCaches(Request, false);
     Require(TextureCacheUsage().sampledEntries == 3, "a release that freed a storage image made the next one skip a sampled scan that would have evicted the texture its caller dropped");

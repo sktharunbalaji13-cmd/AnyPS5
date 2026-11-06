@@ -98,12 +98,16 @@ private:
         std::uint32_t freeUnits = imageBlockUnits;
         std::uint32_t allocations = 0;
         std::uint32_t hint = 0;
+        std::uint32_t noFitUnits = imageBlockUnits + 1u;
+        std::uint32_t noFitAlignment = 1u;
         ImageBlock* previous = nullptr;
         ImageBlock* next = nullptr;
         bool retained = false;
     };
     ImageAllocation takeImageRange(const std::shared_ptr<BufferPool>& owner, std::uint32_t memoryType, VkDeviceSize bytes, VkDeviceSize alignment);
     static std::optional<std::uint32_t> imageRange(const ImageBlock& block, std::uint32_t units, std::uint32_t alignment);
+    static bool imageNoFit(const ImageBlock& block, std::uint32_t units, std::uint32_t alignment) noexcept;
+    static void noteImageNoFit(ImageBlock& block, std::uint32_t units, std::uint32_t alignment) noexcept;
     static void markImageRange(ImageBlock& block, std::uint32_t first, std::uint32_t units, bool occupied) noexcept;
     void linkImageBlock(ImageBlock& block) noexcept;
     void unlinkImageBlock(ImageBlock& block) noexcept;
