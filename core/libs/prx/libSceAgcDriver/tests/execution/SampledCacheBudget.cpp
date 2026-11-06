@@ -803,6 +803,55 @@ void fruitlessReleaseTests(const Context& context) {
     ClearCachedTextures(context.device);
 }
 
+void fruitlessStorageReleaseTests(const Context& context) {
+    constexpr std::uint64_t Request = std::uint64_t{1} << 20u;
+    Block block(context);
+    ClearCachedTextures(context.device);
+    SetFruitlessScanForTest(2, std::chrono::seconds(30));
+    std::vector<std::shared_ptr<Texture>> held;
+    for (std::size_t surface = 0; surface < 4; ++surface) held.push_back(Sampled(context, block.Surface(surface)));
+    std::weak_ptr<StorageTexture> idle = CachedStorageSurface(context, Resource(block.Surface(5)));
+    Require(!idle.expired(), "the storage release fixture did not cache a storage image");
+    Require(ReleaseTextureCaches(Request, false) != 0 && idle.expired(), "a release with every sampled texture held did not fall through to the idle storage image");
+    held.pop_back();
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 3, "a release that freed a storage image made the next one skip a sampled scan that would have evicted the texture its caller dropped");
+    SetFruitlessScanForTest(2, std::chrono::nanoseconds(0));
+    held.clear();
+    ClearCachedTextures(context.device);
+    SetFruitlessScanForTest(1024, std::chrono::microseconds(500));
+}
+
+void recentTextureTests(const Context& context) {
+    constexpr std::uint64_t Request = std::uint64_t{1} << 20u;
+    Block block(context);
+    ClearCachedTextures(context.device);
+    Recorder::CountPresent();
+    for (std::size_t surface = 0; surface < 3; ++surface) Sampled(context, block.Surface(surface));
+    Require(TextureCacheUsage().sampledEntries == 3, "the recent texture fixture did not cache three textures");
+    {
+        const BudgetReclaimScope budgetDriven;
+        ReleaseTextureCaches(Request, true);
+    }
+    Require(TextureCacheUsage().sampledEntries == 3, "a release asked for by the budget evicted textures used in the current present");
+    Recorder::CountPresent();
+    {
+        const BudgetReclaimScope budgetDriven;
+        ReleaseTextureCaches(Request, true);
+    }
+    Require(TextureCacheUsage().sampledEntries == 3, "a release asked for by the budget evicted textures used in the previous present");
+    ReleaseTextureCaches(Request, true);
+    Require(TextureCacheUsage().sampledEntries == 0, "a release after an allocation failure kept textures used in the previous present");
+    for (std::size_t surface = 0; surface < 3; ++surface) Sampled(context, block.Surface(surface));
+    Recorder::CountPresent();
+    Recorder::CountPresent();
+    {
+        const BudgetReclaimScope budgetDriven;
+        ReleaseTextureCaches(Request, true);
+    }
+    Require(TextureCacheUsage().sampledEntries == 0, "a release asked for by the budget kept textures unused for two presents");
+}
+
 void spareAgeTests(const Context& context) {
     Block block(context);
     ClearCachedTextures(context.device);
@@ -1510,6 +1559,8 @@ int main(int argc, char** argv) {
             earlyMissTests(context);
             collidingKeyTests(context);
             fruitlessReleaseTests(context);
+            fruitlessStorageReleaseTests(context);
+            recentTextureTests(context);
             spareAgeTests(context);
             ClearCachedTextures(context.device);
         }

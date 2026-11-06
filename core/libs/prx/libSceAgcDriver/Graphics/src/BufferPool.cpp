@@ -552,6 +552,16 @@ std::size_t BufferPool::MaxSlots() {
     return slots;
 }
 
+VkDeviceSize BufferPool::ReleaseIdle() {
+    static const bool disabled = std::getenv("APS5_NO_IDLE_RELEASE") != nullptr;
+    if (disabled) return 0;
+    constexpr std::int64_t gapNanos = 20'000'000;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto last = idleReleasedAt.load(std::memory_order_relaxed);
+    if (now - last < gapNanos || !idleReleasedAt.compare_exchange_strong(last, now, std::memory_order_relaxed)) return 0;
+    return trim();
+}
+
 VkDeviceSize BufferPool::trim() {
     Tier retiredSmall;
     Tier retiredLarge;
@@ -925,6 +935,10 @@ std::uint64_t ImageMemoryReleasedBytes() noexcept {
 std::shared_ptr<BufferPool> GetBufferPool(const Context& context) {
     if (!context.bufferPool) context.bufferPool = std::make_shared<BufferPool>(context);
     return context.bufferPool;
+}
+
+VkDeviceSize ReleaseIdleBufferMemory(const Context& context) {
+    return context.bufferPool ? context.bufferPool->ReleaseIdle() : 0;
 }
 
 VkDeviceMemory AllocateImageMemory(const Context& context, const VkMemoryAllocateInfo& allocation, std::uint32_t mask, const char* operation, std::uint32_t* allocatedType, bool newImage) {

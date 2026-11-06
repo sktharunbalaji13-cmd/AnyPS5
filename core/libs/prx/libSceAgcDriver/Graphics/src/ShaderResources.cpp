@@ -202,10 +202,10 @@ struct TextureCache {
     std::uint64_t reportedStorage = 0;
     std::chrono::steady_clock::time_point reportedAt{};
     std::uint64_t erasures = 0;
-    std::chrono::steady_clock::time_point fruitlessUntil{};
+    std::atomic<std::int64_t> fruitlessUntilNanos{0};
 };
 
-constexpr unsigned FruitlessScanFactor = 16;
+constexpr unsigned FruitlessScanFactor = 8;
 std::atomic<std::size_t> fruitlessScanEntries{1024};
 std::atomic<std::int64_t> fruitlessScanFloorNanos{500000};
 
@@ -1588,6 +1588,7 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         bool& flag;
         ~Done() { flag = false; }
     } done{releasing};
+    const auto started = std::chrono::steady_clock::now();
     const auto releasedBefore = ImageMemoryReleasedBytes();
     std::uint64_t freed = 0;
     std::size_t sampledEntries = 0;
@@ -1595,6 +1596,7 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
     std::size_t storageKept = 0;
     bool sampledSkipped = false;
     bool sampledRepeated = false;
+    bool sampledScanned = false;
     bool storageSkipped = false;
     {
         auto& cache = Textures();
@@ -1602,11 +1604,13 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         const bool inherited = sampledCacheHeld != 0;
         if ((inherited && (!newImage || sampledCacheReclaimable == 0)) || (!inherited && !lock.try_lock())) {
             sampledSkipped = true;
-        } else if (const auto scanStart = std::chrono::steady_clock::now(); cache.entries.size() >= fruitlessScanEntries.load(std::memory_order_relaxed) && scanStart < cache.fruitlessUntil) {
+        } else if (cache.entries.size() >= fruitlessScanEntries.load(std::memory_order_relaxed) && started.time_since_epoch().count() < cache.fruitlessUntilNanos.load(std::memory_order_relaxed)) {
             sampledRepeated = true;
         } else {
+            sampledScanned = cache.entries.size() >= fruitlessScanEntries.load(std::memory_order_relaxed);
+            static const bool protectEnabled = std::getenv("APS5_PROTECT_RECENT_TEXTURES") != nullptr;
             const auto present = Recorder::Presents();
-            const bool protectRecent = BudgetReclaim && present != 0;
+            const bool protectRecent = protectEnabled && BudgetReclaimFlag() && present != 0;
             for (auto it = cache.entries.end(); it != cache.entries.begin() && freed < bytes;) {
                 --it;
                 if (it->texture.use_count() != 1 || (it->source != nullptr && it->source->Dirty())) continue;
@@ -1618,16 +1622,9 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
                 freed = ImageMemoryReleasedBytes() - releasedBefore;
                 it = next;
             }
-            if (sampledEntries != 0 || cache.entries.size() < fruitlessScanEntries.load(std::memory_order_relaxed)) {
-                cache.fruitlessUntil = {};
-            } else {
-                const auto scanEnd = std::chrono::steady_clock::now();
-                const std::chrono::nanoseconds floor(fruitlessScanFloorNanos.load(std::memory_order_relaxed));
-                cache.fruitlessUntil = scanEnd + std::max<std::chrono::nanoseconds>(scanEnd - scanStart, floor / FruitlessScanFactor) * FruitlessScanFactor;
-            }
         }
     }
-    if (freed < bytes) {
+    if (freed < bytes && !sampledRepeated) {
         auto& cache = StorageTextures();
         std::unique_lock<GuestMemory::GpuMutexType> gpu(GuestMemory::GpuMutex(), std::defer_lock);
         const bool inherited = storageCacheHeld != 0;
@@ -1675,6 +1672,14 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         }
     }
     freed = ImageMemoryReleasedBytes() - releasedBefore;
+    if (sampledScanned && freed == 0 && sampledEntries == 0 && storageEntries == 0 && !storageSkipped) {
+        const auto ended = std::chrono::steady_clock::now();
+        const std::chrono::nanoseconds floor(fruitlessScanFloorNanos.load(std::memory_order_relaxed));
+        const auto window = std::max<std::chrono::nanoseconds>(ended - started, floor / FruitlessScanFactor) * FruitlessScanFactor;
+        Textures().fruitlessUntilNanos.store((ended + window).time_since_epoch().count(), std::memory_order_relaxed);
+    } else if (freed != 0) {
+        Textures().fruitlessUntilNanos.store(0, std::memory_order_relaxed);
+    }
     static std::atomic<std::uint64_t> fruitless{0};
     const bool nothing = freed == 0;
     const auto repeats = nothing ? fruitless.fetch_add(1, std::memory_order_relaxed) + 1 : std::uint64_t{0};
@@ -1691,7 +1696,7 @@ void SetFruitlessScanForTest(std::size_t entries, std::chrono::nanoseconds floor
     fruitlessScanFloorNanos.store(floor.count(), std::memory_order_relaxed);
     auto& cache = Textures();
     std::lock_guard lock(cache.mutex);
-    cache.fruitlessUntil = {};
+    cache.fruitlessUntilNanos.store(0, std::memory_order_relaxed);
 }
 
 bool StorageImageCached(const Context& context, const StorageTexture* image) {
@@ -5437,6 +5442,11 @@ std::uint32_t SamplerTableCapacityFor(const Context& context, bool updateAfterBi
 std::uint64_t& DeviceProcLookups() {
     thread_local std::uint64_t count = 0;
     return count;
+}
+
+bool& BudgetReclaimFlag() {
+    thread_local bool flag = false;
+    return flag;
 }
 
 std::uint32_t ImageTableCapacity(const Context& context) {

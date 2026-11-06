@@ -2721,6 +2721,11 @@ struct AddressBuildTiming {
     double importsUs = 0;
     double mirrorsUs = 0;
     double compareUs = 0;
+    double syncUs = 0;
+    double collectUs = 0;
+    double appendUs = 0;
+    double writableUs = 0;
+    std::uint64_t heapRuns = 0;
     std::uint64_t blocksCompared = 0;
     std::uint64_t blocksCopied = 0;
 };
@@ -3343,14 +3348,31 @@ void planSpaceMirrors(GuestBufferMemory::AddressSpace& space) {
 }
 
 std::vector<std::pair<std::size_t, std::uint64_t>> refreshHeapRuns(const GuestBufferMemory::AddressSpace& space, std::vector<RefreshBlock>& blocks) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    auto& timing = ThreadAddressTiming();
+    const auto since_us = [](std::chrono::steady_clock::time_point from) { return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - from).count(); };
     std::vector<std::pair<std::size_t, std::uint64_t>> checked;
     checked.reserve(space.heapRuns.size());
     for (std::size_t index = 0; index < space.heapRuns.size(); ++index) {
         const auto& run = space.heapRuns[index];
+        auto stamp = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         prepareRange(run.begin, run.bytes);
+        if (profile) {
+            timing.syncUs += since_us(stamp);
+            stamp = std::chrono::steady_clock::now();
+        }
         const auto generation = GuestMemory::CollectWrites(run.begin, static_cast<std::size_t>(run.bytes));
         const auto since = space.verified[index].load(std::memory_order_relaxed);
-        if (since == 0 || !GuestMemory::UnchangedSince(run.begin, static_cast<std::size_t>(run.bytes), since)) appendHeapRun(std::span<ImageMirror* const>(space.heapMirrors).subspan(run.first, run.last - run.first), generation, blocks);
+        const bool changed = since == 0 || !GuestMemory::UnchangedSince(run.begin, static_cast<std::size_t>(run.bytes), since);
+        if (profile) {
+            timing.collectUs += since_us(stamp);
+            stamp = std::chrono::steady_clock::now();
+        }
+        if (changed) appendHeapRun(std::span<ImageMirror* const>(space.heapMirrors).subspan(run.first, run.last - run.first), generation, blocks);
+        if (profile) {
+            timing.appendUs += since_us(stamp);
+            ++timing.heapRuns;
+        }
         checked.emplace_back(index, generation);
     }
     return checked;
@@ -4763,9 +4785,15 @@ void GuestBufferMemory::CountAddressBuild(double snapshotsUs) {
     totals.sums.importsUs += timing.importsUs;
     totals.sums.mirrorsUs += timing.mirrorsUs;
     totals.sums.compareUs += timing.compareUs;
+    totals.sums.syncUs += timing.syncUs;
+    totals.sums.collectUs += timing.collectUs;
+    totals.sums.appendUs += timing.appendUs;
+    totals.sums.writableUs += timing.writableUs;
+    totals.sums.heapRuns += timing.heapRuns;
     totals.sums.blocksCompared += timing.blocksCompared;
     totals.sums.blocksCopied += timing.blocksCopied;
     totals.snapshotsUs += snapshotsUs;
+    if (const double buildUs = timing.leaseUs + timing.importsUs + timing.mirrorsUs + timing.compareUs + snapshotsUs; buildUs > 100000.0) AgcDriver::ProfilePrint_nid_no_patch("[address-slow] build %.0f ms: lease %.1f imports %.1f mirrors %.1f (writable %.1f, heap-run sync %.1f collect %.1f append %.1f over %llu runs) compare %.1f (%llu blocks, %llu copied) snapshots %.1f ms\n", buildUs / 1000.0, timing.leaseUs / 1000.0, timing.importsUs / 1000.0, timing.mirrorsUs / 1000.0, timing.writableUs / 1000.0, timing.syncUs / 1000.0, timing.collectUs / 1000.0, timing.appendUs / 1000.0, static_cast<unsigned long long>(timing.heapRuns), timing.compareUs / 1000.0, static_cast<unsigned long long>(timing.blocksCompared), static_cast<unsigned long long>(timing.blocksCopied), snapshotsUs / 1000.0);
     timing = {};
     const auto now = std::chrono::steady_clock::now();
     if (now - totals.lastReport < std::chrono::seconds(10)) return;
@@ -4777,6 +4805,7 @@ void GuestBufferMemory::CountAddressBuild(double snapshotsUs) {
     const auto space = AddressSpaceCounters();
     const auto& spaceSeen = totals.spaceSeen;
     AgcDriver::ProfilePrint_nid_no_patch("[address] %llu address-based builds (10 s), us per build: lease %.0f, imports pass %.0f, mirror prepare %.0f, compare %.0f (%.0f blocks, %.1f copied), snapshots %.0f; space hits %llu / rebuilds: generation %llu, epoch %llu, device %llu, waiter drop %llu, first %llu; unpublished %llu, dissolved: overlap %llu, imports %llu%s; [bda-table] hits %llu / misses %llu (space tables %llu), first entry: expired %llu, hash differs low %llu / heap %llu, same hash %llu, none held %llu\n", static_cast<unsigned long long>(totals.builds), per(totals.sums.leaseUs), per(totals.sums.importsUs), per(totals.sums.mirrorsUs), per(totals.sums.compareUs), per(static_cast<double>(totals.sums.blocksCompared)), per(static_cast<double>(totals.sums.blocksCopied)), per(totals.snapshotsUs), delta(space.hits, spaceSeen.hits), delta(space.rebuiltGeneration, spaceSeen.rebuiltGeneration), delta(space.rebuiltEpoch, spaceSeen.rebuiltEpoch), delta(space.rebuiltDevice, spaceSeen.rebuiltDevice), delta(space.rebuiltWaiterDrop, spaceSeen.rebuiltWaiterDrop), delta(space.rebuiltFirst, spaceSeen.rebuiltFirst), delta(space.unpublished, spaceSeen.unpublished), delta(space.dissolvedOverlap, spaceSeen.dissolvedOverlap), delta(space.dissolvedImports, spaceSeen.dissolvedImports), space.enabled ? "" : " (cache off)", delta(table.hits, seen.hits), delta(table.misses, seen.misses), delta(table.spaceTables, seen.spaceTables), delta(table.firstExpired, seen.firstExpired), delta(table.firstDiffersLow, seen.firstDiffersLow), delta(table.firstDiffersHeap, seen.firstDiffersHeap), delta(table.firstSameHash, seen.firstSameHash), delta(table.firstEmpty, seen.firstEmpty));
+    AgcDriver::ProfilePrint_nid_no_patch("[address-parts] per build us: writable mirrors %.0f, heap-run sync %.0f, collect %.0f, append %.0f (%.1f runs)\n", per(totals.sums.writableUs), per(totals.sums.syncUs), per(totals.sums.collectUs), per(totals.sums.appendUs), per(static_cast<double>(totals.sums.heapRuns)));
     totals.tableSeen = table;
     totals.spaceSeen = space;
     totals.builds = 0;
@@ -4910,10 +4939,12 @@ void GuestBufferMemory::AcquireRegistered() {
             // before any of them is dereferenced.
             served = true;
             mirrored = space->mirrored;
+            const auto writableStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             for (const auto index : space->writableMirrors) {
                 const auto& region = space->base[index];
                 if (prepareRefresh(*region.mirror, region.begin, region.end - region.begin)) appendBlocks(blocks, *region.mirror, region.begin, region.end - region.begin);
             }
+            if (profile) timing.writableUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - writableStart).count();
             lap(timing.mirrorsUs, at);
         }
     }

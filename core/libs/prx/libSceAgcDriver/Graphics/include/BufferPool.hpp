@@ -79,6 +79,7 @@ public:
     std::optional<BufferAllocation> Take(std::size_t bytes, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, const char* category = nullptr, bool hostPlaced = false);
     void Put(const BufferAllocation& allocation) noexcept;
     VkDeviceSize ReclaimIdleDevice(VkDeviceSize bytes, std::chrono::steady_clock::time_point now);
+    VkDeviceSize ReleaseIdle();
     static bool SlabEligible(std::size_t capacity, VkDeviceSize alignment, VkDeviceSize size, VkDeviceSize atom);
     static VkDeviceSize SlabBlockBytes(std::size_t capacity);
     SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable);
@@ -213,6 +214,7 @@ private:
     std::unordered_map<VkDeviceMemory, std::unique_ptr<ImageBlock>> imageBlocks;
     std::array<ImageBlock*, VK_MAX_MEMORY_TYPES> imageAvailable{};
     std::atomic<VkDeviceSize> retainedImageSlabBytes{0};
+    std::atomic<std::int64_t> idleReleasedAt{0};
     static constexpr VkDeviceSize budget = 512ull * 1024 * 1024;
     // The small tier's own budget (slots of at most half a MiB each): pinned host memory the large
     // tier's budget does not count.
@@ -225,6 +227,7 @@ private:
 };
 
 std::shared_ptr<BufferPool> GetBufferPool(const Context& context);
+VkDeviceSize ReleaseIdleBufferMemory(const Context& context);
 VkDeviceMemory AllocateImageMemory(const Context& context, const VkMemoryAllocateInfo& allocation, std::uint32_t mask, const char* operation, std::uint32_t* allocatedType = nullptr, bool newImage = false);
 void ReleaseImageMemory(const Context& context, VkDeviceMemory memory, VkDeviceSize bytes, std::uint32_t memoryType) noexcept;
 

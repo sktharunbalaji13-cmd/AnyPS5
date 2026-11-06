@@ -150,11 +150,11 @@ std::uint64_t& DeviceProcLookups();
 
 inline constexpr std::size_t EmptyBufferBytes = 16;
 
-inline thread_local bool BudgetReclaim = false;
+bool& BudgetReclaimFlag();
 
 struct BudgetReclaimScope {
-    BudgetReclaimScope() { BudgetReclaim = true; }
-    ~BudgetReclaimScope() { BudgetReclaim = false; }
+    BudgetReclaimScope() { BudgetReclaimFlag() = true; }
+    ~BudgetReclaimScope() { BudgetReclaimFlag() = false; }
     BudgetReclaimScope(const BudgetReclaimScope&) = delete;
     BudgetReclaimScope& operator=(const BudgetReclaimScope&) = delete;
 };
@@ -203,6 +203,7 @@ struct Context {
     std::mutex* settleQueueMutex = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties2 memoryProperties2 = nullptr;
     VkDeviceSize (*cacheReclaim)(VkDeviceSize bytes, bool newImage) = nullptr;
+    VkDeviceSize (*idleReclaim)(const Context& context) = nullptr;
     RenderCache* renderCache = nullptr;
     DrawQueue* drawQueue = nullptr;
     GraphicsPipelineCache* graphicsPipelines = nullptr;
@@ -374,8 +375,13 @@ struct Context {
         if (report.Fits(bytes)) return type;
         const auto host = HostMemoryType(mask);
         if (!host) return type;
+        auto current = report;
+        if (idleReclaim != nullptr && idleReclaim(*this) != 0) {
+            current = ReportedHeap(heap);
+            if (current.Fits(bytes)) return type;
+        }
         if (cacheReclaim != nullptr) {
-            const auto wanted = bytes + (report.usage > report.budget ? report.usage - report.budget : 0u);
+            const auto wanted = bytes + (current.usage > current.budget ? current.usage - current.budget : 0u);
             const BudgetReclaimScope budgetDriven;
             const auto released = cacheReclaim(wanted, true);
             if (released >= wanted) return type;

@@ -4565,6 +4565,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.memoryProperties2 =state->memoryBudget ? state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2") : nullptr;
     context.singlePassStorage = state->storageImageWithoutFormat;
     context.cacheReclaim = Graphics::ReleaseTextureCaches;
+    context.idleReclaim = Graphics::ReleaseIdleBufferMemory;
     return context;
 }
 
