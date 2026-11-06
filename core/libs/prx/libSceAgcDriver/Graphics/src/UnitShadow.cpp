@@ -16,6 +16,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 
 namespace AgcDriver::Graphics {
@@ -26,12 +27,20 @@ constexpr std::uint64_t UnitBytes = 65536;
 constexpr std::size_t ReasonCount = static_cast<std::size_t>(PublishReason::Count);
 constexpr const char* ReasonNames[ReasonCount] = {"hook", "region", "indirect", "copy-src", "copy-dst", "fill", "fill-clear", "label", "keys", "scanout", "validate", "upload", "tail", "evict", "retire", "teardown", "address"};
 
-std::uint64_t BudgetBytes() {
-    static const std::uint64_t budget = [] {
+constexpr std::uint64_t DefaultBudgetBytes = std::uint64_t{1024} << 20u;
+constexpr std::uint64_t HeapBudgetShare = 32;
+
+std::optional<std::uint64_t> ConfiguredBudgetBytes() {
+    static const std::optional<std::uint64_t> budget = [] {
         const char* text = std::getenv("APS5_UNIT_SHADOW_MIB");
-        return (text != nullptr ? std::strtoull(text, nullptr, 10) : 1024ull) << 20u;
+        return text != nullptr ? std::optional<std::uint64_t>(std::strtoull(text, nullptr, 10) << 20u) : std::nullopt;
     }();
     return budget;
+}
+
+std::uint64_t BudgetBytes(const Context& context) {
+    if (const auto configured = ConfiguredBudgetBytes()) return *configured;
+    return UnitShadowBudgetBytes(context.memory);
 }
 
 std::uint32_t SlabUnits() {
@@ -495,6 +504,14 @@ bool UnitShadowEnabled() {
     return enabled;
 }
 
+std::uint64_t UnitShadowBudgetBytes(const VkPhysicalDeviceMemoryProperties& memory) {
+    std::uint64_t heap = 0;
+    for (std::uint32_t index = 0; index < std::min<std::uint32_t>(memory.memoryHeapCount, VK_MAX_MEMORY_HEAPS); ++index) {
+        if ((memory.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) heap = std::max<std::uint64_t>(heap, memory.memoryHeaps[index].size);
+    }
+    return heap == 0 ? DefaultBudgetBytes : std::min(DefaultBudgetBytes, heap / HeapBudgetShare);
+}
+
 bool ShadowVerify() {
     static const bool verify = std::getenv("APS5_SHADOW_VERIFY") != nullptr;
     return verify;
@@ -660,7 +677,7 @@ std::optional<ShadowDestination> ShadowDestinationFor(const Context& context, co
         for (;;) {
             {
                 std::lock_guard lock(registry.mutex);
-                if (registry.liveBytes + needed <= BudgetBytes()) break;
+                if (registry.liveBytes + needed <= BudgetBytes(context)) break;
             }
             if (!evictOne(registry)) {
                 Stats().refused.fetch_add(1, std::memory_order_relaxed);

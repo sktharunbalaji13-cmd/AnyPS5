@@ -388,6 +388,20 @@ void gpuTimingKeyTests() {
     Require(Recorder::TimingKeyLabel(Recorder::DrawTimingKey(0x123456789abcdefull)) == "draw 0x123456789abcdef", "a wide variant id was cut in the label");
 }
 
+void unitShadowBudgetTests() {
+    constexpr std::uint64_t Mebibyte = std::uint64_t{1} << 20u;
+    const auto heaps = [](std::initializer_list<VkMemoryHeap> list) {
+        VkPhysicalDeviceMemoryProperties memory{};
+        for (const auto& heap : list) memory.memoryHeaps[memory.memoryHeapCount++] = heap;
+        return memory;
+    };
+    Require(UnitShadowBudgetBytes(heaps({{8192 * Mebibyte, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT}, {16384 * Mebibyte, 0}})) == 256 * Mebibyte, "an 8 GiB device-local heap did not get a 256 MiB unit shadow budget");
+    Require(UnitShadowBudgetBytes(heaps({{16384 * Mebibyte, 0}, {6144 * Mebibyte, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT}})) == 192 * Mebibyte, "the host heap counted toward the unit shadow budget");
+    Require(UnitShadowBudgetBytes(heaps({{4096 * Mebibyte, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT}, {8192 * Mebibyte, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT}})) == 256 * Mebibyte, "the largest device-local heap did not set the unit shadow budget");
+    Require(UnitShadowBudgetBytes(heaps({{49152 * Mebibyte, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT}})) == 1024 * Mebibyte, "a large device-local heap passed the previous 1024 MiB budget");
+    Require(UnitShadowBudgetBytes(heaps({{16384 * Mebibyte, 0}})) == 1024 * Mebibyte, "a device without a device-local heap lost the default unit shadow budget");
+}
+
 void deviceSelectionTests() {
     const auto properties = [](const char* name, VkPhysicalDeviceType type) {
         VkPhysicalDeviceProperties result{};
@@ -14838,6 +14852,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--gpu-timing-key-only") {
             gpuTimingKeyTests();
             std::cout << "gpu timing key tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--unit-shadow-budget-only") {
+            unitShadowBudgetTests();
+            std::cout << "unit shadow budget tests passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--device-selection-only") {
