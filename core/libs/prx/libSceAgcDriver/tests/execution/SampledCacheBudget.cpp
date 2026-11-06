@@ -776,6 +776,33 @@ void recycleTests(const Context& context) {
     Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "the second big snapshot did not take the parked spare of its size");
 }
 
+void fruitlessReleaseTests(const Context& context) {
+    constexpr std::uint64_t Request = std::uint64_t{1} << 20u;
+    Block block(context);
+    ClearCachedTextures(context.device);
+    SetFruitlessScanForTest(2, std::chrono::seconds(30));
+    std::vector<std::shared_ptr<Texture>> held;
+    for (std::size_t surface = 0; surface < 4; ++surface) held.push_back(Sampled(context, block.Surface(surface)));
+    Require(TextureCacheUsage().sampledEntries == 4, "the fruitless release fixture did not cache four textures");
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 4, "a release evicted a texture its caller still holds");
+    held.pop_back();
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 4, "a cache that had nothing to release a moment ago was scanned again at once");
+    SetFruitlessScanForTest(2, std::chrono::nanoseconds(0));
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 3, "a release after the repeat window did not evict the texture its caller dropped");
+    SetFruitlessScanForTest(16, std::chrono::seconds(30));
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 3, "a release evicted a texture its caller still holds");
+    held.pop_back();
+    ReleaseTextureCaches(Request, false);
+    Require(TextureCacheUsage().sampledEntries == 2, "a cache smaller than the repeat threshold skipped a scan that would have evicted a texture");
+    SetFruitlessScanForTest(1024, std::chrono::microseconds(500));
+    held.clear();
+    ClearCachedTextures(context.device);
+}
+
 void spareAgeTests(const Context& context) {
     Block block(context);
     ClearCachedTextures(context.device);
@@ -1482,6 +1509,7 @@ int main(int argc, char** argv) {
             secondUseTests(context);
             earlyMissTests(context);
             collidingKeyTests(context);
+            fruitlessReleaseTests(context);
             spareAgeTests(context);
             ClearCachedTextures(context.device);
         }

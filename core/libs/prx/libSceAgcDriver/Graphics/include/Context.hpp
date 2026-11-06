@@ -150,6 +150,15 @@ std::uint64_t& DeviceProcLookups();
 
 inline constexpr std::size_t EmptyBufferBytes = 16;
 
+inline thread_local bool BudgetReclaim = false;
+
+struct BudgetReclaimScope {
+    BudgetReclaimScope() { BudgetReclaim = true; }
+    ~BudgetReclaimScope() { BudgetReclaim = false; }
+    BudgetReclaimScope(const BudgetReclaimScope&) = delete;
+    BudgetReclaimScope& operator=(const BudgetReclaimScope&) = delete;
+};
+
 struct Context {
     VkDevice device;
     VkPhysicalDevice physical;
@@ -367,6 +376,7 @@ struct Context {
         if (!host) return type;
         if (cacheReclaim != nullptr) {
             const auto wanted = bytes + (report.usage > report.budget ? report.usage - report.budget : 0u);
+            const BudgetReclaimScope budgetDriven;
             const auto released = cacheReclaim(wanted, true);
             if (released >= wanted) return type;
             if (released != 0) {
