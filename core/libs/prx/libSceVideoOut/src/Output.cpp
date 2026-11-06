@@ -263,10 +263,13 @@ int APS5_VABI sceVideoOutGetResolutionStatus(int handle, VideoOutResolutionStatu
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     *status = VideoOutResolutionStatus{};
-    status->fullWidth = cfg->width;
-    status->fullHeight = cfg->height;
-    status->paneWidth = cfg->width;
-    status->paneHeight = cfg->height;
+    const auto limit = VideoOutHostResolutionLimit();
+    const std::uint32_t reportedWidth = limit.width != 0 && limit.width < cfg->width ? limit.width : cfg->width;
+    const std::uint32_t reportedHeight = limit.height != 0 && limit.height < cfg->height ? limit.height : cfg->height;
+    status->fullWidth = reportedWidth;
+    status->fullHeight = reportedHeight;
+    status->paneWidth = reportedWidth;
+    status->paneHeight = reportedHeight;
     status->refreshRate = (cfg->outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? VIDEO_OUT_REFRESH_RATE_119_88HZ : VIDEO_OUT_REFRESH_RATE_59_94HZ;
     return 0;
 } catch (const ProcessShutdown&) {
