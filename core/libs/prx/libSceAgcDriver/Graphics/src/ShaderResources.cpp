@@ -2020,6 +2020,7 @@ struct ReusedTableElement {
     bool firstLayer = false;
     bool rejected = false;
     std::string message;
+    bool dynamic = false;
 };
 
 struct ReusedTable {
@@ -2074,7 +2075,7 @@ bool CachedTableTextures(const ReusedTable& table, std::vector<std::shared_ptr<T
     std::vector<std::list<CachedTexture>::iterator> entries;
     entries.reserve(table.queries.size());
     for (const auto& element : table.elements) {
-        if (element.rejected) continue;
+        if (element.rejected || element.dynamic) continue;
         const auto it = findTexture(cache, element.key);
         if (it == cache.entries.end() || it->texture != element.texture.lock()) return false;
         entries.push_back(it);
@@ -5631,6 +5632,49 @@ void ShaderResources::resolveImageTables() {
             place(element, std::move(texture), resource, guestBytes, firstLayer);
             return {};
         };
+        const auto resolveSampled = [&](std::uint32_t element, std::span<const std::uint32_t> words, auto&& handleResolved, auto&& handleError) {
+            GuestTextureResource resource{};
+            std::uint64_t guestBytes = 0;
+            bool firstLayer = false;
+            auto shape = ShaderRecompiler::DescriptorImageShape::Image2D;
+            try {
+                resource = DecodeTextureResource(words);
+                shape = binding.imageShapes.at(element);
+                const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
+                firstLayer = shape == ShaderRecompiler::DescriptorImageShape::Image2D && (resource.dimension == TextureDimension::k2DArray || (depthCompare && resource.dimension == TextureDimension::k1DArray));
+                const bool depth1D = depthCompare && ((shape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k1D) || (shape == ShaderRecompiler::DescriptorImageShape::Image2DArray && resource.dimension == TextureDimension::k1DArray));
+                if (!firstLayer && !depth1D && !MatchesGuestDimension(shape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the table entry's image shape (shape " + std::to_string(static_cast<int>(shape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
+                guestBytes = DescribeSurface(resource).guestBytes;
+                if (!GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(guestBytes)) && GuestMemory::CommittedRanges(resource.baseAddress, static_cast<std::size_t>(guestBytes), false).empty()) throw std::runtime_error("AGC graphics: the table entry's surface at 0x" + HexText(resource.baseAddress) + " (0x" + HexText(guestBytes) + " bytes) is not mapped");
+                static_cast<void>(ResolveTextureFormat(resource.format));
+            } catch (const std::runtime_error& error) {
+                table.map[faults + element] = rejectTableElement(table, words, error.what());
+                handleError(error.what());
+                return false;
+            }
+            std::array<std::uint32_t, 8> narrowed{};
+            const auto sampledWords = firstLayerWords(words, binding.imageShapes.at(element), narrowed, true);
+            if (sampledWords.data() != words.data()) {
+                resource = DecodeTextureResource(sampledWords);
+                guestBytes = DescribeSurface(resource).guestBytes;
+            }
+            CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(guestBytes));
+            if (resource.dccAddress != 0) CompletePendingCpuWrites(context, resource.dccAddress, DccKeyBytes(guestBytes));
+            std::shared_ptr<Texture> texture;
+            const auto components = ViewComponents(resource);
+            const bool depthCompare = binding.imageDepthCompare.at(element);
+            const VkImageViewType multisampleViewType = shape == ShaderRecompiler::DescriptorImageShape::Image2DMultisampleArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+            try {
+                Require(context.imageViewMinLod || EffectiveMinLod(resource) == 0.0f, "a sampled image table entry has a minimum LOD clamp, which needs VK_EXT_image_view_min_lod");
+                texture = cachedTexture(context, sampledWords, resource, components, guestBytes, depthCompare, multisampleViewType);
+            } catch (const std::runtime_error& error) {
+                table.map[faults + element] = rejectTableElement(table, words, error.what());
+                handleError(error.what());
+                return false;
+            }
+            handleResolved(std::move(texture), resource, guestBytes, firstLayer, sampledWords, components, depthCompare);
+            return true;
+        };
         const auto state = CurrentTableState();
         std::vector<std::shared_ptr<Texture>> cached;
         const bool storageTable = std::find(binding.imageWritten.begin(), binding.imageWritten.end(), true) != binding.imageWritten.end();
@@ -5642,10 +5686,14 @@ void ShaderResources::resolveImageTables() {
                 const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8u, 8u);
                 const auto& entry = reused->elements[element];
                 if (static_cast<std::uint64_t>(table.elementBase) + element >= context.imageTableCapacity) {
-                    if (!entry.rejected) ++next;
+                    if (!entry.rejected && !entry.dynamic) ++next;
                     table.map[faults + element] = rejectTableElement(table, words, capacityMessage());
                 } else if (entry.rejected) {
                     table.map[faults + element] = rejectTableElement(table, words, entry.message);
+                } else if (entry.dynamic) {
+                    resolveSampled(element, words, [&](std::shared_ptr<Texture> texture, const GuestTextureResource& resource, std::uint64_t guestBytes, bool firstLayer, std::span<const std::uint32_t> sampledWords, const auto&, bool) {
+                        bind(element, sampledWords, std::move(texture), resource, guestBytes, firstLayer);
+                    }, [](std::string_view) {});
                 } else {
                     CompletePendingCpuWrites(context, entry.resource.baseAddress, static_cast<std::size_t>(entry.guestBytes));
                     if (!replay) {
@@ -5689,25 +5737,6 @@ void ShaderResources::resolveImageTables() {
                 substitutes.push_back(element);
                 continue;
             }
-            GuestTextureResource resource{};
-            std::uint64_t guestBytes = 0;
-            bool firstLayer = false;
-            auto shape = ShaderRecompiler::DescriptorImageShape::Image2D;
-            try {
-                resource = DecodeTextureResource(words);
-                shape = binding.imageShapes.at(element);
-                const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
-                firstLayer = shape == ShaderRecompiler::DescriptorImageShape::Image2D && (resource.dimension == TextureDimension::k2DArray || (depthCompare && resource.dimension == TextureDimension::k1DArray));
-                const bool depth1D = depthCompare && ((shape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k1D) || (shape == ShaderRecompiler::DescriptorImageShape::Image2DArray && resource.dimension == TextureDimension::k1DArray));
-                if (!firstLayer && !depth1D && !MatchesGuestDimension(shape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the table entry's image shape (shape " + std::to_string(static_cast<int>(shape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
-                guestBytes = DescribeSurface(resource).guestBytes;
-                if (!GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(guestBytes)) && GuestMemory::CommittedRanges(resource.baseAddress, static_cast<std::size_t>(guestBytes), false).empty()) throw std::runtime_error("AGC graphics: the table entry's surface at 0x" + HexText(resource.baseAddress) + " (0x" + HexText(guestBytes) + " bytes) is not mapped");
-                static_cast<void>(ResolveTextureFormat(resource.format));
-            } catch (const std::runtime_error& error) {
-                table.map[faults + element] = rejectTableElement(table, words, error.what());
-                if (reusable) fresh.elements.push_back({{}, {}, {}, 0, false, true, error.what()});
-                continue;
-            }
             if (element < binding.imageWritten.size() && binding.imageWritten[element]) {
                 reusable = false;
                 const auto storageBinding = storageTableBindings[table.set];
@@ -5717,6 +5746,21 @@ void ShaderResources::resolveImageTables() {
                 }
                 if (absolute >= StorageTableCapacity(context)) {
                     table.map[faults + element] = rejectTableElement(table, words, "the stored table element " + std::to_string(absolute) + " of set " + std::to_string(table.set) + " is past the image storage table's capacity of " + std::to_string(StorageTableCapacity(context)) + " images");
+                    continue;
+                }
+                GuestTextureResource resource{};
+                std::uint64_t guestBytes = 0;
+                bool firstLayer = false;
+                try {
+                    resource = DecodeTextureResource(words);
+                    const auto shape = binding.imageShapes.at(element);
+                    firstLayer = shape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
+                    if (!firstLayer && !MatchesGuestDimension(shape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the table entry's image shape (shape " + std::to_string(static_cast<int>(shape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
+                    guestBytes = DescribeSurface(resource).guestBytes;
+                    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(guestBytes)) && GuestMemory::CommittedRanges(resource.baseAddress, static_cast<std::size_t>(guestBytes), false).empty()) throw std::runtime_error("AGC graphics: the table entry's surface at 0x" + HexText(resource.baseAddress) + " (0x" + HexText(guestBytes) + " bytes) is not mapped");
+                    static_cast<void>(ResolveTextureFormat(resource.format));
+                } catch (const std::runtime_error& error) {
+                    table.map[faults + element] = rejectTableElement(table, words, error.what());
                     continue;
                 }
                 CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(guestBytes));
@@ -5747,38 +5791,24 @@ void ShaderResources::resolveImageTables() {
                 reusable = false;
                 continue;
             }
-            std::array<std::uint32_t, 8> narrowed{};
-            const auto sampledWords = firstLayerWords(words, binding.imageShapes.at(element), narrowed, true);
-            if (sampledWords.data() != words.data()) {
-                resource = DecodeTextureResource(sampledWords);
-                guestBytes = DescribeSurface(resource).guestBytes;
-            }
-            CompletePendingCpuWrites(context, resource.baseAddress, static_cast<std::size_t>(guestBytes));
-            if (resource.dccAddress != 0) CompletePendingCpuWrites(context, resource.dccAddress, DccKeyBytes(guestBytes));
-            std::shared_ptr<Texture> texture;
-            const auto components = ViewComponents(resource);
-            const bool depthCompare = binding.imageDepthCompare.at(element);
-            const VkImageViewType multisampleViewType = shape == ShaderRecompiler::DescriptorImageShape::Image2DMultisampleArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-            try {
-                Require(context.imageViewMinLod || EffectiveMinLod(resource) == 0.0f, "a sampled image table entry has a minimum LOD clamp, which needs VK_EXT_image_view_min_lod");
-                texture = cachedTexture(context, sampledWords, resource, components, guestBytes, depthCompare, multisampleViewType);
-            } catch (const std::runtime_error& error) {
-                table.map[faults + element] = rejectTableElement(table, words, error.what());
-                if (reusable) fresh.elements.push_back({{}, {}, {}, 0, false, true, error.what()});
-                continue;
-            }
-            if (reusable) {
-                const auto& log = lookupLog();
-                const auto* looked = log.empty() ? nullptr : &log.back();
-                reusable = looked != nullptr && looked->object == texture.get() && looked->source == nullptr && looked->generation != 0 && looked->keys == DccKeys::Uncompressed && resource.dccAddress == 0;
+            resolveSampled(element, words, [&](std::shared_ptr<Texture> texture, const GuestTextureResource& resource, std::uint64_t guestBytes, bool firstLayer, std::span<const std::uint32_t> sampledWords, const auto& components, bool depthCompare) {
                 if (reusable) {
-                    fresh.elements.push_back({MakeTextureKey(context.device, sampledWords, components, depthCompare), texture, resource, guestBytes, firstLayer, false, {}});
-                    fresh.queries.push_back({resource.baseAddress, static_cast<std::size_t>(guestBytes), looked->generation});
-                    fresh.ranges.emplace_back(resource.baseAddress, resource.baseAddress + guestBytes);
+                    const auto& log = lookupLog();
+                    const auto* looked = log.empty() ? nullptr : &log.back();
+                    const bool staticElement = looked != nullptr && looked->object == texture.get() && looked->source == nullptr && looked->generation != 0 && looked->keys == DccKeys::Uncompressed && resource.dccAddress == 0;
+                    if (staticElement) {
+                        fresh.elements.push_back({MakeTextureKey(context.device, sampledWords, components, depthCompare), texture, resource, guestBytes, firstLayer, false, {}, false});
+                        fresh.queries.push_back({resource.baseAddress, static_cast<std::size_t>(guestBytes), looked->generation});
+                        fresh.ranges.emplace_back(resource.baseAddress, resource.baseAddress + guestBytes);
+                    } else {
+                        fresh.elements.push_back({{}, {}, {}, 0, false, false, {}, true});
+                    }
                 }
-            }
-            if (!representativeNeeded.empty() && representativeNeeded[element]) representativeSources.emplace(element, VariantSource{resource, guestBytes, firstLayer});
-            fresh.bound[element] = bind(element, sampledWords, std::move(texture), resource, guestBytes, firstLayer);
+                if (!representativeNeeded.empty() && representativeNeeded[element]) representativeSources.emplace(element, VariantSource{resource, guestBytes, firstLayer});
+                fresh.bound[element] = bind(element, sampledWords, std::move(texture), resource, guestBytes, firstLayer);
+            }, [&](std::string_view msg) {
+                if (reusable) fresh.elements.push_back({{}, {}, {}, 0, false, true, std::string(msg), false});
+            });
         }
         for (const auto element : substitutes) {
             const auto representative = representatives[element];
