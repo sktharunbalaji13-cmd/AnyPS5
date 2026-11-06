@@ -202,7 +202,12 @@ struct TextureCache {
     std::uint64_t reportedStorage = 0;
     std::chrono::steady_clock::time_point reportedAt{};
     std::uint64_t erasures = 0;
+    std::chrono::steady_clock::time_point fruitlessUntil{};
 };
+
+constexpr std::size_t FruitlessScanEntries = 1024;
+constexpr std::chrono::nanoseconds FruitlessScanFloor = std::chrono::microseconds(500);
+constexpr unsigned FruitlessScanFactor = 16;
 
 TextureCache& Textures() {
     static TextureCache cache;
@@ -1589,6 +1594,7 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
     std::size_t storageEntries = 0;
     std::size_t storageKept = 0;
     bool sampledSkipped = false;
+    bool sampledRepeated = false;
     bool storageSkipped = false;
     {
         auto& cache = Textures();
@@ -1596,6 +1602,8 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         const bool inherited = sampledCacheHeld != 0;
         if ((inherited && (!newImage || sampledCacheReclaimable == 0)) || (!inherited && !lock.try_lock())) {
             sampledSkipped = true;
+        } else if (const auto scanStart = std::chrono::steady_clock::now(); cache.entries.size() >= FruitlessScanEntries && scanStart < cache.fruitlessUntil) {
+            sampledRepeated = true;
         } else {
             for (auto it = cache.entries.end(); it != cache.entries.begin() && freed < bytes;) {
                 --it;
@@ -1606,6 +1614,12 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
                 ++sampledEntries;
                 freed = ImageMemoryReleasedBytes() - releasedBefore;
                 it = next;
+            }
+            if (sampledEntries != 0 || cache.entries.size() < FruitlessScanEntries) {
+                cache.fruitlessUntil = {};
+            } else {
+                const auto scanEnd = std::chrono::steady_clock::now();
+                cache.fruitlessUntil = scanEnd + std::max<std::chrono::nanoseconds>(scanEnd - scanStart, FruitlessScanFloor / FruitlessScanFactor) * FruitlessScanFactor;
             }
         }
     }
@@ -1657,7 +1671,14 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         }
     }
     freed = ImageMemoryReleasedBytes() - releasedBefore;
-    std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept);
+    static std::atomic<std::uint64_t> fruitless{0};
+    const bool nothing = freed == 0 && sampledEntries == 0 && storageEntries == 0;
+    const auto repeats = nothing ? fruitless.fetch_add(1, std::memory_order_relaxed) + 1 : std::uint64_t{0};
+    if (!nothing || repeats <= 5 || (repeats & (repeats - 1)) == 0) {
+        char total[48] = "";
+        if (nothing) std::snprintf(total, sizeof(total), "; %llu fruitless releases so far", static_cast<unsigned long long>(repeats));
+        std::fprintf(stderr, "[gpu] texture caches released %llu MiB of the %llu MiB asked for: %zu sampled entries%s, %zu storage images%s, %zu with pending results kept%s\n", static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, sampledSkipped ? " (cache busy, skipped)" : sampledRepeated ? " (nothing to release a moment ago, skipped)" : "", storageEntries, storageSkipped ? " (cache or device busy, skipped)" : "", storageKept, total);
+    }
     return freed;
 }
 
