@@ -7985,6 +7985,17 @@ void unitShadowBudgetTests() {
     reported.heapBudget[0] = 64 * GiB;
     reported.heapBudget[1] = 6 * GiB;
     Require(UnitShadowBudget(memory, &reported) == 768 * MiB, "the unit shadow budget was read from a host heap");
+
+    using AgcDriver::Graphics::NoteUnitShadowPressure;
+    using AgcDriver::Graphics::UnitShadowUnderPressure;
+    using AgcDriver::Graphics::WorkingUnitShadowBudgetBytes;
+    Context context{};
+    context.memory = memory;
+    Require(!UnitShadowUnderPressure(), "pressure was active before being noted");
+    Require(WorkingUnitShadowBudgetBytes(context) == 1024 * MiB, "without pressure the working budget differed from base budget");
+    NoteUnitShadowPressure(100 * MiB);
+    Require(UnitShadowUnderPressure(), "pressure was not active after being noted");
+    Require(WorkingUnitShadowBudgetBytes(context) == 256 * MiB, "under pressure the working budget was not scaled down to 256 MiB");
 }
 
 void storageTextureBudgetTests() {

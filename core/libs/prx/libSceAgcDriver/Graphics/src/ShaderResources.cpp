@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MemoryAccounting.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
@@ -1571,6 +1572,7 @@ void ClearCachedTextures(VkDevice device) {
 }
 
 std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
+    NoteUnitShadowPressure(bytes);
     thread_local bool releasing = false;
     if (releasing) return 0;
     releasing = true;

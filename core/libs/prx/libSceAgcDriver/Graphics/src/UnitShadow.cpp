@@ -46,6 +46,27 @@ std::uint64_t BudgetBytes(const Context& context) {
     return budget;
 }
 
+namespace {
+std::atomic<std::uint64_t> pressureUntilPresent{0};
+constexpr std::uint64_t PressureDurationPresents = 30;
+constexpr std::uint64_t PressureFloorBytes = std::uint64_t{128} << 20u;
+constexpr std::uint64_t PressureCapBytes = std::uint64_t{256} << 20u;
+}
+
+void NoteUnitShadowPressure(std::uint64_t bytesAsked) {
+    pressureUntilPresent.store(Recorder::Presents() + PressureDurationPresents, std::memory_order_relaxed);
+}
+
+bool UnitShadowUnderPressure() {
+    return Recorder::Presents() < pressureUntilPresent.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WorkingUnitShadowBudgetBytes(const Context& context) {
+    const auto base = BudgetBytes(context);
+    if (!UnitShadowUnderPressure()) return base;
+    return std::min(base, std::max(PressureFloorBytes, std::min(PressureCapBytes, base / 4u)));
+}
+
 std::uint32_t SlabUnits() {
     static const std::uint32_t units = [] {
         const char* text = std::getenv("APS5_UNIT_SHADOW_SLAB_MIB");
@@ -500,6 +521,16 @@ bool evictOne(Shadows& registry) {
     return true;
 }
 
+bool TrimUnitShadow(const Context& context) {
+    if (!GuestMemory::GpuMutex().HeldByThisThread()) return false;
+    auto& registry = Registry();
+    {
+        std::lock_guard lock(registry.mutex);
+        if (registry.liveBytes <= WorkingUnitShadowBudgetBytes(context)) return false;
+    }
+    return evictOne(registry);
+}
+
 }
 
 std::uint64_t UnitShadowBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported) {
@@ -677,10 +708,11 @@ std::optional<ShadowDestination> ShadowDestinationFor(const Context& context, co
         const auto firstUnit = static_cast<std::uint64_t>(slabIndex) * SlabUnits();
         const auto units = static_cast<std::uint32_t>(std::min<std::uint64_t>(SlabUnits(), shadow->Units() - firstUnit));
         const auto needed = static_cast<std::uint64_t>(units) * UnitBytes;
+        const auto budget = WorkingUnitShadowBudgetBytes(context);
         for (;;) {
             {
                 std::lock_guard lock(registry.mutex);
-                if (registry.liveBytes + needed <= BudgetBytes(context)) break;
+                if (registry.liveBytes + needed <= budget) break;
             }
             if (!evictOne(registry)) {
                 Stats().refused.fetch_add(1, std::memory_order_relaxed);
