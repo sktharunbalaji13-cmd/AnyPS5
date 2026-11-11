@@ -186,6 +186,7 @@ struct Context {
     bool sparseResidencyBuffer = false;
     bool sparseResidencyAliased = false;
     bool sparseResidencyImage2D = false;
+    bool sparseResidencyVolume = false;
     PFN_vkGetPhysicalDeviceSparseImageFormatProperties sparseImageFormatProperties = nullptr;
     std::uint32_t queueFamily = 0;
     std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;

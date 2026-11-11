@@ -49,6 +49,21 @@ struct SparseLevelBinds {
 };
 
 std::optional<SparseLevelBinds> PlanSparseLevels(VkExtent3D extent, std::uint32_t mipLevels, std::uint32_t arrayLayers, VkDeviceSize alignment, std::span<const VkSparseImageMemoryRequirements> requirements, std::uint32_t firstLevel);
+
+struct SparseVolumeBinds {
+    SparseLevelBinds binds;
+    std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> depthRuns;
+
+    bool Bound(std::uint32_t level, std::uint32_t slice) const noexcept {
+        if (level >= depthRuns.size()) return true;
+        for (const auto& [begin, end] : depthRuns[level]) {
+            if (slice >= begin && slice < end) return true;
+        }
+        return false;
+    }
+};
+
+std::optional<SparseVolumeBinds> PlanSparseVolume(VkExtent3D extent, std::uint32_t mipLevels, VkDeviceSize alignment, std::span<const VkSparseImageMemoryRequirements> requirements, std::span<const std::uint32_t> slices);
 bool ClearKeepsDenormals(const Context& context, VkFormat format);
 bool ClearColorForTexel(VkFormat format, std::uint32_t elementBytes, std::span<const std::uint32_t, 4> pattern, VkClearColorValue& clear);
 

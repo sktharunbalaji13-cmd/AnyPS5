@@ -457,6 +457,65 @@ std::optional<SparseLevelBinds> PlanSparseLevels(VkExtent3D extent, std::uint32_
     return plan;
 }
 
+static bool SparseVolumeSupported(const Context& context, const VkImageCreateInfo& info) {
+    if (!context.sparseResidencyVolume || context.sparseImageFormatProperties == nullptr || info.imageType != VK_IMAGE_TYPE_3D) return false;
+    static const bool disabled = std::getenv("APS5_NO_SPARSE_TEXTURE_VOLUMES") != nullptr;
+    if (disabled) return false;
+    if ((context.sparseQueue == VK_NULL_HANDLE || context.sparseQueueMutex == nullptr) && !GuestMemory::GpuMutex().HeldByThisThread()) return false;
+    VkImageFormatProperties limits{};
+    if (context.imageFormatProperties(context.physical, info.format, info.imageType, info.tiling, info.usage, info.flags | VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT, &limits) != VK_SUCCESS) return false;
+    if (limits.maxMipLevels < info.mipLevels || limits.maxExtent.width < info.extent.width || limits.maxExtent.height < info.extent.height || limits.maxExtent.depth < info.extent.depth) return false;
+    std::uint32_t count = 0;
+    context.sparseImageFormatProperties(context.physical, info.format, info.imageType, VK_SAMPLE_COUNT_1_BIT, info.usage, info.tiling, &count, nullptr);
+    std::vector<VkSparseImageFormatProperties> properties(count);
+    context.sparseImageFormatProperties(context.physical, info.format, info.imageType, VK_SAMPLE_COUNT_1_BIT, info.usage, info.tiling, &count, properties.data());
+    return std::any_of(properties.begin(), properties.begin() + count, [](const VkSparseImageFormatProperties& format) { return (format.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) != 0; });
+}
+
+std::optional<SparseVolumeBinds> PlanSparseVolume(VkExtent3D extent, std::uint32_t mipLevels, VkDeviceSize alignment, std::span<const VkSparseImageMemoryRequirements> requirements, std::span<const std::uint32_t> slices) {
+    const VkSparseImageMemoryRequirements* color = nullptr;
+    for (const auto& entry : requirements) {
+        const auto aspects = entry.formatProperties.aspectMask;
+        if (aspects == VK_IMAGE_ASPECT_COLOR_BIT && color == nullptr) color = &entry;
+        else if (aspects != VK_IMAGE_ASPECT_METADATA_BIT) return std::nullopt;
+    }
+    if (color == nullptr || alignment == 0) return std::nullopt;
+    const auto granularity = color->formatProperties.imageGranularity;
+    if (granularity.width == 0 || granularity.height == 0 || granularity.depth == 0) return std::nullopt;
+    if (!std::is_sorted(slices.begin(), slices.end())) return std::nullopt;
+    const auto aligned = [&](VkDeviceSize size) { return (size + alignment - 1u) / alignment * alignment; };
+    const auto tailFirst = std::min(color->imageMipTailFirstLod, mipLevels);
+    SparseVolumeBinds plan;
+    plan.depthRuns.resize(tailFirst);
+    for (std::uint32_t level = 0; level < tailFirst; ++level) {
+        const auto width = std::max(extent.width >> level, 1u);
+        const auto height = std::max(extent.height >> level, 1u);
+        const auto depth = std::max(extent.depth >> level, 1u);
+        const VkDeviceSize layerBlocks = static_cast<VkDeviceSize>((width + granularity.width - 1u) / granularity.width) * ((height + granularity.height - 1u) / granularity.height);
+        for (std::size_t index = 0; index < slices.size() && slices[index] < depth;) {
+            const auto first = slices[index] / granularity.depth;
+            auto last = first;
+            for (++index; index < slices.size() && slices[index] < depth && slices[index] / granularity.depth <= last + 1u; ++index) last = slices[index] / granularity.depth;
+            const auto begin = first * granularity.depth;
+            const auto end = std::min((last + 1u) * granularity.depth, depth);
+            plan.binds.levels.push_back({{VK_IMAGE_ASPECT_COLOR_BIT, level, 0}, {0, 0, static_cast<std::int32_t>(begin)}, {width, height, end - begin}, VK_NULL_HANDLE, plan.binds.bytes, 0});
+            plan.binds.bytes += layerBlocks * (last - first + 1u) * alignment;
+            plan.depthRuns[level].emplace_back(begin, end);
+        }
+    }
+    if (tailFirst < mipLevels) {
+        plan.binds.tails.push_back({color->imageMipTailOffset, color->imageMipTailSize, VK_NULL_HANDLE, plan.binds.bytes, 0});
+        plan.binds.bytes += aligned(color->imageMipTailSize);
+    }
+    for (const auto& entry : requirements) {
+        if (entry.formatProperties.aspectMask != VK_IMAGE_ASPECT_METADATA_BIT) continue;
+        plan.binds.tails.push_back({entry.imageMipTailOffset, entry.imageMipTailSize, VK_NULL_HANDLE, plan.binds.bytes, VK_SPARSE_MEMORY_BIND_METADATA_BIT});
+        plan.binds.bytes += aligned(entry.imageMipTailSize);
+    }
+    if (plan.binds.bytes == 0) return std::nullopt;
+    return plan;
+}
+
 static std::vector<VkSparseImageMemoryRequirements> SparseRequirements(const Context& context, VkImage image) {
     std::uint32_t count = 0;
     context.Function<PFN_vkGetImageSparseMemoryRequirements>("vkGetImageSparseMemoryRequirements")(context.device, image, &count, nullptr);
@@ -591,7 +650,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         auto skip = unmapped != 0 && SparseLevelsSupported(context, imageInfo) ? unmapped : 0u;
         const auto denseInfo = imageInfo;
         const std::array<std::uint32_t, 2> families{context.queueFamily, context.sparseFamily};
-        if (skip != 0) {
+        bool volume = skip == 0 && packedSlabs.has_value() && !zeroed.empty() && !layerRows && !depthCompare && !srgbExpand && SparseVolumeSupported(context, imageInfo);
+        if (skip != 0 || volume) {
             imageInfo.flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT;
             if (context.sparseQueue != VK_NULL_HANDLE && context.sparseFamily != context.queueFamily) {
                 imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
@@ -603,23 +663,37 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
         owned->image = image;
         std::optional<SparseLevelBinds> sparseBinds;
-        if (skip != 0) {
+        std::optional<SparseVolumeBinds> volumeBinds;
+        if (skip != 0 || volume) {
             VkMemoryRequirements requirements{};
             context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
-            sparseBinds = PlanSparseLevels(imageInfo.extent, imageInfo.mipLevels, imageInfo.arrayLayers, requirements.alignment, SparseRequirements(context, image), skip);
+            if (volume) {
+                std::vector<std::uint32_t> slices;
+                slices.reserve(uploaded.size());
+                for (const auto& slot : uploaded) slices.push_back(static_cast<std::uint32_t>(geometry.CopyDepth(slot.layer)));
+                std::ranges::sort(slices);
+                volumeBinds = PlanSparseVolume(imageInfo.extent, imageInfo.mipLevels, requirements.alignment, SparseRequirements(context, image), slices);
+                if (volumeBinds && volumeBinds->binds.bytes > requirements.size / 2u) volumeBinds.reset();
+            } else {
+                sparseBinds = PlanSparseLevels(imageInfo.extent, imageInfo.mipLevels, imageInfo.arrayLayers, requirements.alignment, SparseRequirements(context, image), skip);
+            }
             if (sparseBinds) {
                 allocationBytes = BindSparseLevels(context, *owned, *sparseBinds, requirements);
+            } else if (volumeBinds) {
+                allocationBytes = BindSparseLevels(context, *owned, volumeBinds->binds, requirements);
+                if (profile) std::fprintf(stderr, "[gpu] sparse volume 0x%llx: %llu of %llu MiB bound for %zu of %u slices in %zu binds\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(allocationBytes >> 20u), static_cast<unsigned long long>(requirements.size >> 20u), uploaded.size(), imageInfo.extent.depth, volumeBinds->binds.levels.size());
             } else {
                 owned.reset();
                 image = VK_NULL_HANDLE;
                 skip = 0;
+                volume = false;
                 imageInfo = denseInfo;
                 owned = std::make_shared<OwnedImage>(context, VK_NULL_HANDLE, VK_NULL_HANDLE);
                 Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
                 owned->image = image;
             }
         }
-        if (!sparseBinds) {
+        if (!sparseBinds && !volumeBinds) {
             owned->Allocate(context, imageInfo, "vkAllocateMemory texture", true, true);
             allocationBytes = owned->memoryBytes;
             Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->allocation.Memory(), owned->allocation.Offset()), "vkBindImageMemory");
@@ -773,9 +847,10 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toTransferDst.subresourceRange = layerRows ? VkImageSubresourceRange{barrierAspect, 0, 1, 0, 1} : VkImageSubresourceRange{barrierAspect, 0, descriptor.mipCount, 0, geometry.imageLayers};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (zeros != nullptr ? VK_PIPELINE_STAGE_TRANSFER_BIT : 0u), VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, static_cast<std::uint32_t>(readBarriers.size()), readBarriers.data(), 1, &toTransferDst);
 
-            const auto layerRegions = [&](std::uint32_t layer, std::uint64_t linearLayerOffset, std::vector<VkBufferImageCopy>& regions) {
+            const auto layerRegions = [&](std::uint32_t layer, std::uint64_t linearLayerOffset, std::vector<VkBufferImageCopy>& regions, bool boundOnly = false) {
                 for (std::uint32_t level = skip; level < descriptor.mipCount; ++level) {
                     if (!geometry.HasLayer(level, layer)) continue;
+                    if (boundOnly && !volumeBinds->Bound(level, static_cast<std::uint32_t>(geometry.CopyDepth(layer)))) continue;
                     const auto& mip = mips[level];
                     VkBufferImageCopy region{};
                     region.bufferOffset = linearLayerOffset + mip.linearOffset;
@@ -805,8 +880,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             if (linear != nullptr) context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, linear->Handle(), uploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
             std::vector<VkBufferImageCopy> zeroRegions;
             zeroRegions.reserve(zeroed.size() * mips.size());
-            for (const auto layer : zeroed) layerRegions(layer, 0, zeroRegions);
-            if (zeros != nullptr) context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, zeros->Handle(), uploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(zeroRegions.size()), zeroRegions.data());
+            for (const auto layer : zeroed) layerRegions(layer, 0, zeroRegions, volumeBinds.has_value());
+            if (zeros != nullptr && !zeroRegions.empty()) context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, zeros->Handle(), uploadImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(zeroRegions.size()), zeroRegions.data());
             if (srgbExpand) {
                 std::array<VkImageMemoryBarrier, 2> toBlit{};
                 toBlit[0] = toTransferDst;
