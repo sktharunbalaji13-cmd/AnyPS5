@@ -14,6 +14,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "ShaderDiskCache.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -52,9 +53,9 @@ void PrintFailure(std::exception_ptr error) {
     std::fflush(stderr);
 }
 
-constexpr std::uint64_t DriverMemoryAddress = 0xfe0000000ull;
+constexpr std::uint64_t DriverMemoryAddress = 0xfe0000000ull + GuestArena::GuestAddressOffset;
 constexpr std::size_t DriverMemoryBytes = 2u << 20u;
-constexpr std::uint64_t FsTableAddress = 0xfe0040000ull;
+constexpr std::uint64_t FsTableAddress = DriverMemoryAddress + 0x40000ull;
 constexpr std::uint64_t FsTableSlotBytes = 16u;
 constexpr std::uint64_t FsTableSlots = 6u;
 constexpr std::uint64_t FsRoutineRecords = 8u;
@@ -87,6 +88,9 @@ void MapDriverMemory() {
     auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress);
     slot[0] = (FsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
     slot[1] = FsTableDword3 << 32u | FsRoutineRecords;
+#ifndef _WIN32
+    GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, DriverMemoryBytes);
+#endif
     GuestAllocations::Mutation mutation;
     mutation.Add(mapped, DriverMemoryBytes, true, true, true);
 }
@@ -161,11 +165,18 @@ void Driver::stop() {
     for (auto& [queue, worker] : workers) {
         if (worker.thread.joinable()) worker.thread.join();
     }
+    try {
+        DrawFinisher::Get().Drain();
+    } catch (...) {
+    }
     DrawPipeline::Queue0().Stop();
+    DrawPipeline::Queue0().ReleaseRetired();
+    DrawFinisher::Get().ReleaseRan();
     StopWorkerSampler();
     CloseRegistrationPreparation();
     Graphics::StopPipelineLibraryWorker();
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    Graphics::ReportHostImports();
     device.Reset();
     replacedDevices.clear();
     Graphics::FlushPipelineJournal();
@@ -178,10 +189,40 @@ void Driver::stop() {
     stopped = true;
 }
 
+namespace {
+void InstallWriteSourceTrap(std::uint64_t base);
+}
 Driver::Driver() {
+    static const bool pulseTrace = std::getenv("APS5_TRACE_FLAG_PULSE") != nullptr;
+    if (pulseTrace) {
+        static std::jthread pulse([pulseTrace]() {
+            const auto started = std::chrono::steady_clock::now();
+            const auto elapsedSeconds = [&started] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(); };
+            std::array<std::uint32_t, 1024> previous{};
+            std::memcpy(previous.data(), reinterpret_cast<const void*>(0x1100000000ull), sizeof(previous));
+            std::fprintf(stderr, "[flag-pulse] page baseline at %.3f s%s", elapsedSeconds(), "\n");
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                auto* page = reinterpret_cast<const std::uint32_t*>(0x1100000000ull);
+                for (std::size_t index = 0; index < previous.size(); ++index) {
+                    const auto value = page[index];
+                    if (value == previous[index]) continue;
+                    std::fprintf(stderr, "[flag-pulse] 0x%llx 0x%x -> 0x%x at %.3f s%s", static_cast<unsigned long long>(0x1100000000ull + index * 4), previous[index], value, elapsedSeconds(), "\n");
+                    previous[index] = value;
+                }
+            }
+        });
+        static_cast<void>(pulse);
+    }
     InstallAsyncLog_nid_no_patch();
+    static const bool trapSources = std::getenv("APS5_TRACE_WRITE_SOURCES") != nullptr;
+    if (trapSources) InstallWriteSourceTrap(0x1100000000ull);
     static const bool driverMemory = (MapDriverMemory(), true);
     static_cast<void>(driverMemory);
+    LibcSetExitDrain_nid_no_patch([] {
+        const auto current = Driver::Get().device.Load();
+        if (current) current->SavePipelineCache();
+    });
     static_cast<void>(GuestMemory::TrackerGeneration());
     ShaderMemory::SetWaitedMsProvider(&Graphics::Recorder::ThreadWaitedMs);
     try {
@@ -217,18 +258,94 @@ Driver::Driver() {
     });
 }
 
+namespace {
+
+std::atomic<int> g_writeSourcesSeen{0};
+std::uintptr_t g_guardedPage = 0;
+
+LONG CALLBACK WriteSourceTrap(EXCEPTION_POINTERS* info) {
+    const auto code = info->ExceptionRecord->ExceptionCode;
+    DWORD previous = 0;
+    if (code == STATUS_SINGLE_STEP) {
+        info->ContextRecord->EFlags &= ~0x100u;
+        VirtualProtect(reinterpret_cast<void*>(g_guardedPage), 0x1000, PAGE_READONLY, &previous);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (code != STATUS_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    if (info->ExceptionRecord->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
+    const auto address = static_cast<std::uint64_t>(info->ExceptionRecord->ExceptionInformation[1]);
+    const auto rip = static_cast<std::uint64_t>(info->ContextRecord->Rip);
+    if (address != 0x1100000320ull && address != 0x1100000400ull) {
+        VirtualProtect(reinterpret_cast<void*>(g_guardedPage), 0x1000, PAGE_READWRITE, &previous);
+        info->ContextRecord->EFlags |= 0x100u;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    const int seen = g_writeSourcesSeen.load(std::memory_order_relaxed);
+    if (seen < 400) {
+        g_writeSourcesSeen.store(seen + 1, std::memory_order_relaxed);
+        std::fprintf(stderr, "[write-source] 0x%llx written by rip=0x%llx tid=%lu\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(rip), static_cast<unsigned long>(GetCurrentThreadId()));
+    }
+    VirtualProtect(reinterpret_cast<void*>(g_guardedPage), 0x1000, PAGE_READWRITE, &previous);
+    info->ContextRecord->EFlags |= 0x100u;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void InstallWriteSourceTrap(std::uint64_t base) {
+    g_guardedPage = static_cast<std::uintptr_t>(base & ~0xfffull);
+    AddVectoredExceptionHandler(1, &WriteSourceTrap);
+    DWORD previous = 0;
+    VirtualProtect(reinterpret_cast<void*>(g_guardedPage), 0x1000, PAGE_READONLY, &previous);
+    std::fprintf(stderr, "[write-source] page 0x%llx read-only\n", static_cast<unsigned long long>(g_guardedPage));
+}
+
+}
+
 void Driver::WaitIdle() {
+    require(!onWorkerThread(), "worker cannot wait for itself");
+    {
+        std::unique_lock lock(mutex);
+        const auto target = accepted;
+        ++idleWaiters;
+        const auto start = std::chrono::steady_clock::now();
+        bool reported = false;
+        while (failure == nullptr && !stopping && completed < target) {
+            changed.wait_for(lock, std::chrono::milliseconds(500), [&] { return failure != nullptr || stopping || completed >= target; });
+            if (reported) continue;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            if (ms < 3000) continue;
+            reported = true;
+            if (std::getenv("APS5_REPORT_DRIVER_LOCK") == nullptr) continue;
+            std::fprintf(stderr, "[waitidle] the guest waits for the GPU: %llu of %llu submissions completed, %llu packets in flight\n",
+                         static_cast<unsigned long long>(completed), static_cast<unsigned long long>(target),
+                         static_cast<unsigned long long>(packetsInFlight.load()));
+            for (const auto& [queue, worker] : workers) {
+                if (worker.pending.empty()) continue;
+                std::fprintf(stderr, "[waitidle]   queue 0x%x has %zu submission(s) pending\n", queue, worker.pending.size());
+            }
+        }
+        --idleWaiters;
+        rethrowFailure();
+        checkStopping();
+    }
+    std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    if (const auto localDevice = device.Load()) localDevice->WaitIdle();
+}
+
+bool Driver::WaitIdleFor(std::chrono::milliseconds timeout) {
     require(!onWorkerThread(), "worker cannot wait for itself");
     std::unique_lock lock(mutex);
     const auto target = accepted;
     ++idleWaiters;
-    // The wait lasts as long as the slowest queue. A wait that never ends names the queues
-    // that still hold a submission, so the blocked one is visible.
     const auto start = std::chrono::steady_clock::now();
     bool reported = false;
-    while (failure == nullptr && !stopping && completed < target) {
-        changed.wait_for(lock, std::chrono::milliseconds(500), [&] { return failure != nullptr || stopping || completed >= target; });
-        if (reported) continue;
+    bool idle = failure != nullptr || stopping || completed >= target;
+    while (!idle) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+        if (elapsed >= timeout) break;
+        const auto remaining = timeout - elapsed;
+        idle = changed.wait_for(lock, remaining < std::chrono::milliseconds(500) ? remaining : std::chrono::milliseconds(500),
+                                [&] { return failure != nullptr || stopping || completed >= target; });
+        if (idle || reported) continue;
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         if (ms < 3000) continue;
         reported = true;
@@ -244,6 +361,29 @@ void Driver::WaitIdle() {
     --idleWaiters;
     rethrowFailure();
     checkStopping();
+    return idle;
+}
+
+std::vector<AwaitedWait> Driver::AwaitedWaits() {
+    std::vector<AwaitedWait> result;
+    for (const auto& slot : awaitedSlots) {
+        const auto address = slot.address.load(std::memory_order_acquire);
+        if (address == 0) continue;
+        AwaitedWait wait;
+        wait.address = address;
+        wait.reference = slot.reference.load(std::memory_order_relaxed);
+        wait.mask = slot.mask.load(std::memory_order_relaxed);
+        const auto shape = slot.shape.load(std::memory_order_relaxed);
+        wait.function = static_cast<std::uint32_t>(shape);
+        wait.bytes = static_cast<std::uint32_t>(shape >> 32u);
+        if (slot.address.load(std::memory_order_acquire) == address) result.push_back(wait);
+    }
+    return result;
+}
+
+std::pair<std::uint64_t, std::uint64_t> Driver::SerialProgress() {
+    std::lock_guard lock(mutex);
+    return {accepted, completed};
 }
 
 void Driver::CheckFailure() {
@@ -303,4 +443,9 @@ std::unique_lock<std::mutex> HoldAsyncLog() {
     return AsyncLog::Get().Hold();
 }
 
+}
+
+extern "C" void* AgcDriverStaticTable_nid_postfix() {
+    static_cast<void>(AgcDriver::DriverDetail::Driver::Get());
+    return reinterpret_cast<void*>(AgcDriver::DriverDetail::FsTableAddress);
 }

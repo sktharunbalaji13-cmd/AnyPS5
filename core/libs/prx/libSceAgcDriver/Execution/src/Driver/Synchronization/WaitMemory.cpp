@@ -114,8 +114,6 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
     auto& outcomes = waitOutcomes();
     const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
     const std::size_t awaitedBytes = Pm4::WaitAwaitedBytes(packet);
-    // The awaited address is aligned to the width the wait reads, so an 8-byte wait reads the
-    // dword the guest's 64-bit release wrote, not the one below it.
     const auto alignMask = awaitedBytes == 8 ? ~7ull : ~3ull;
     const std::uint64_t awaited = (packet[2] & static_cast<std::uint32_t>(alignMask)) | (static_cast<std::uint64_t>(packet[3]) << 32u);
     static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
@@ -225,7 +223,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                 if (takeLabel(localDevice->PendingLabel(awaited, awaitedBytes, received, &refusal), refusal, false, false)) return;
             }
 
-            if (!overlapSubmit || localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) localDevice->SubmitRecorded(false);
+            if (!overlapSubmit || localDevice->OpenWriteOverlaps(awaited, awaitedBytes) || std::getenv("APS5_SUBMIT_ON_WAIT") != nullptr) localDevice->SubmitRecorded(false);
         }
     }
 
@@ -324,6 +322,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
 
     if (entryTryFailed && pollService(false)) return;
 
+    noteWaitFields(queue, packet);
     noteWaitBlocked(queue, awaited, true);
     struct BlockedWait {
         Driver& driver;
@@ -360,9 +359,6 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
         }
         CheckFailure();
         if (pollService(!spinning)) return;
-        // The wait reads the awaited word with a raw volatile load, so a GPU write to it that
-        // the recorder still holds is invisible to the wait. The flush publishes the held
-        // results over the awaited range, so the wait sees the value the guest's release wrote.
         if (storeHeldResults && !spinning && (polls & 31u) == 0) GuestMemory::FlushGpuWrites(awaited, awaitedBytes);
         noteAwaitingTitle(queue, awaited);
         if (requireMemory && (polls & 15u) == 0) {
@@ -393,6 +389,13 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                          queue, wide ? "_64" : "", static_cast<unsigned long long>(awaited),
                          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count()),
                          packet[1] & 7u, static_cast<unsigned long long>(reference), static_cast<unsigned long long>(mask), static_cast<unsigned long long>(current));
+            {
+                char words[256];
+                int used = 0;
+                for (std::size_t index = 0; index < packet.size() && used < static_cast<int>(sizeof(words)) - 16; ++index) used += std::snprintf(words + used, sizeof(words) - static_cast<std::size_t>(used), " %08x", packet[index]);
+                std::fprintf(stderr, "[gpu]   raw packet:%s\n", words);
+                std::fprintf(stderr, "[gpu]   waiting thread tid=%lu\n", static_cast<unsigned long>(GetCurrentThreadId()));
+            }
             for (const auto& record : writeHistory()) {
                 if (record.length != 0 && record.target <= awaited && awaited < record.target + std::max<std::uint64_t>(record.length, 4))
                     std::fprintf(stderr, "[gpu]   earlier write by queue 0x%x opcode 0x%x at 0x%llx+0x%llx\n", record.queue, record.opcode, static_cast<unsigned long long>(record.target), static_cast<unsigned long long>(record.length));
@@ -438,7 +441,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
             const std::uint64_t reference = wide ? packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u) : packet[4];
             const std::uint64_t mask = wide ? packet[6] | (static_cast<std::uint64_t>(packet[7]) << 32u) : packet[5];
-            const std::uint64_t current = wide ? *reinterpret_cast<const volatile std::uint64_t*>(awaited) : *reinterpret_cast<const volatile std::uint32_t*>(awaited);
+            const std::uint64_t current = awaitedBytes == 8 ? *reinterpret_cast<const volatile std::uint64_t*>(awaited) : *reinterpret_cast<const volatile std::uint32_t*>(awaited);
             std::fprintf(stderr, "[gpu] queue 0x%x WAIT_REG_MEM%s%s at 0x%llx timed out after %dms (function %u ref 0x%llx mask 0x%llx value 0x%llx)\n", queue, wide ? "_64" : "", requireMemory ? " (landing)" : "",
                          static_cast<unsigned long long>(awaited), waitTimeoutMs(), packet[1] & 7u, static_cast<unsigned long long>(reference), static_cast<unsigned long long>(mask), static_cast<unsigned long long>(current));
             const auto address = awaited;

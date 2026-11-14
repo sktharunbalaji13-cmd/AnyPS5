@@ -3,7 +3,9 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/SampleOrder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -55,8 +57,17 @@ std::uint64_t MultisampledColorBytes(const ColorTarget& target);
 std::size_t MultisampledDccBytes(const ColorTarget& target);
 VkClearColorValue MultisampledDccClear(const ColorTarget& target, std::span<const std::byte> dcc, std::span<const std::byte> cmask);
 bool MultisampledFillClearColor(const ColorTarget& target, std::uint32_t fill, VkClearColorValue& clear);
+struct MultisampledSingleClear {
+    std::uint64_t descriptor = 0;
+    std::array<std::uint32_t, 4> color{};
+};
+std::optional<MultisampledSingleClear> MatchMultisampledSingleClear(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
+void NoteMultisampledSingleClear(const GuestTextureResource& resource, const std::array<std::uint32_t, 4>& color);
+bool TakeMultisampledSingleClear(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
 bool TakeMultisampledClear(MultisampledCmask& cmask, MultisampledColorFill& colorFill, const ColorTarget& use, VkClearColorValue& clear);
+SampleOrderTarget MultisampleTargetOrderTarget(const Context& context, const ColorTarget& target);
 std::shared_ptr<Texture> MultisampleTargetTexture(const Context& context, const GuestTextureResource& resource, VkComponentMapping components, VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D);
+std::shared_ptr<Texture> MultisampleTargetFirstSample(const Context& context, const GuestTextureResource& resource, VkComponentMapping components);
 VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, VkImage* image = nullptr);
 VkImageView MultisampleTargetView(const Context& context, const ColorTarget& target, std::shared_ptr<void>& owner, VkImage* image = nullptr);
 void KeepMultisampleTarget_nid_no_patch(const std::shared_ptr<void>& owner);
@@ -66,24 +77,20 @@ VkImageView MultisampleTargetStorageView(const Context& context, const GuestText
 // address. The title's multisample target and its single-sample surface share the address
 // it gave them, so a descriptor that names that address addresses the target.
 bool MultisampleTargetCovers(const Context& context, std::uint64_t address);
+std::shared_ptr<void> PinMultisampleSurfaceOwner(const Context& context, const GuestTextureResource& surface, std::uint32_t mip, ColorTarget& use);
+void ResolvePinnedMultisampleTarget(const Context& context, const std::shared_ptr<void>& owner, const ColorTarget& use, StorageTexture& destination, VkImageView destinationView);
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 void NoteColorMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
+std::shared_ptr<Texture> MultisampleTargetFmaskTexture_nid_no_patch(const Context& context, const GuestTextureResource& resource, VkComponentMapping components);
 void ClearMultisampleTargets(VkDevice device);
 void InstallResidentImageReadGuard_nid_no_patch();
 void UpdateResidentImageUnmapObserver_nid_no_patch();
+void GuardOneFragmentFmask(const Context& context, const ColorTarget& target);
 void RequireNoMultisampleTarget(std::uint64_t address, std::size_t bytes, const char* access);
-// Mission 21: prepare a guest read that overlaps a multisampled color target. The target's
-// samples live only on the host, so a read of the target's own single-sample surface is
-// served by resolving the target into that surface first; a read that reaches past the
-// surface into the sample footprint is still refused.
 void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, const char* access);
-// Mission 21: prepare a guest read that overlaps a multisampled color target. The target's
-// samples live only on the host, so a read of the target's own single-sample surface is
-// served by resolving the target into that surface first; a read that reaches past the
-// surface into the sample footprint is still refused.
-void PrepareMultisampleTargetRead(std::uint64_t address, std::size_t bytes, const char* access);
+void RequireNoMultisampleColorTarget(std::uint64_t address, std::size_t bytes, const char* access);
 
 }
 

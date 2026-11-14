@@ -96,7 +96,7 @@ std::vector<std::uint32_t> Draw(const StencilState& stencilState) {
         {0x2fe, 0}, {0x302, 0}, {0x306, 0}, {0x30a, 0},
         {0x318, static_cast<std::uint32_t>(color >> 8u)}, {0x390, static_cast<std::uint32_t>(color >> 40u)}, {0x292, 2},
         {0x000, 0}, {0x002, 0}, {0x007, (3u << 16u) | 63u},
-        {0x008, 0}, {0x009, static_cast<std::uint32_t>(1.0f)}, {0x00a, 0}, {0x00b, 0},
+        {0x008, 0}, {0x009, std::bit_cast<std::uint32_t>(1.0f)}, {0x00a, 0}, {0x00b, 0},
         {0x010, 3}, {0x011, 1},
         {0x012, static_cast<std::uint32_t>(depth >> 8u)}, {0x014, static_cast<std::uint32_t>(depth >> 8u)},
         {0x013, static_cast<std::uint32_t>(stencil >> 8u)}, {0x015, static_cast<std::uint32_t>(stencil >> 8u)},

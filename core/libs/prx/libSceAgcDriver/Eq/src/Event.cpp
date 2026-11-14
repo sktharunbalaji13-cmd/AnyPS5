@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -20,7 +21,7 @@ struct Registration {
     int id;
 };
 
-std::mutex g_mutex;
+AgcDriver::Mutex g_mutex;
 std::vector<Registration> g_registrations;
 
 }
@@ -31,12 +32,32 @@ bool AgcDriverDeliverEopInterrupt(std::uint32_t queue) {
         std::lock_guard lock(g_mutex);
         registrations = g_registrations;
     }
+    static const bool traceEop = std::getenv("APS5_TRACE_EOP") != nullptr;
+    if (traceEop) {
+        static std::atomic<std::uint64_t> calls{0};
+        const auto n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 20 || (n % 10) == 0) std::fprintf(stderr, "[eop] call %llu queue 0x%x registrations %zu\n", static_cast<unsigned long long>(n), queue, registrations.size());
+    }
     bool delivered = false;
     for (const auto& registration : registrations) {
         if (registration.id == static_cast<int>(queue)) {
             EqueueTriggerEvent_nid_postfix(registration.eq, static_cast<uintptr_t>(registration.id), EvfiltGraphicsCore, nullptr);
             delivered = true;
         }
+    }
+
+    if (traceEop) {
+        static std::atomic<std::uint64_t> deliveredCount{0};
+        static std::atomic<std::uint64_t> undeliveredCount{0};
+        if (delivered) deliveredCount.fetch_add(1, std::memory_order_relaxed);
+        else {
+            const auto n = undeliveredCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 5) {
+                std::fprintf(stderr, "[eop] undelivered queue 0x%x ids:", queue);
+                for (const auto& registration : registrations) std::fprintf(stderr, " %d", registration.id);
+                std::fprintf(stderr, "\n");
+            }
+        }
     }
     return delivered;
 }
