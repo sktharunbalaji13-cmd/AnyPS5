@@ -46,26 +46,10 @@ std::uint64_t BudgetBytes(const Context& context) {
     return budget;
 }
 
-namespace {
 std::atomic<std::uint64_t> pressureUntilPresent{0};
 constexpr std::uint64_t PressureDurationPresents = 30;
 constexpr std::uint64_t PressureFloorBytes = std::uint64_t{128} << 20u;
 constexpr std::uint64_t PressureCapBytes = std::uint64_t{256} << 20u;
-}
-
-void NoteUnitShadowPressure(std::uint64_t bytesAsked) {
-    pressureUntilPresent.store(Recorder::Presents() + PressureDurationPresents, std::memory_order_relaxed);
-}
-
-bool UnitShadowUnderPressure() {
-    return Recorder::Presents() < pressureUntilPresent.load(std::memory_order_relaxed);
-}
-
-std::uint64_t WorkingUnitShadowBudgetBytes(const Context& context) {
-    const auto base = BudgetBytes(context);
-    if (!UnitShadowUnderPressure()) return base;
-    return std::min(base, std::max(PressureFloorBytes, std::min(PressureCapBytes, base / 4u)));
-}
 
 std::uint32_t SlabUnits() {
     static const std::uint32_t units = [] {
@@ -521,6 +505,22 @@ bool evictOne(Shadows& registry) {
     return true;
 }
 
+}
+
+void NoteUnitShadowPressure(std::uint64_t bytesAsked) {
+    pressureUntilPresent.store(Recorder::Presents() + PressureDurationPresents, std::memory_order_relaxed);
+}
+
+bool UnitShadowUnderPressure() {
+    return Recorder::Presents() < pressureUntilPresent.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WorkingUnitShadowBudgetBytes(const Context& context) {
+    const auto base = BudgetBytes(context);
+    if (!UnitShadowUnderPressure()) return base;
+    return std::min(base, std::max(PressureFloorBytes, std::min(PressureCapBytes, base / 4u)));
+}
+
 bool TrimUnitShadow(const Context& context) {
     if (!GuestMemory::GpuMutex().HeldByThisThread()) return false;
     auto& registry = Registry();
@@ -529,8 +529,6 @@ bool TrimUnitShadow(const Context& context) {
         if (registry.liveBytes <= WorkingUnitShadowBudgetBytes(context)) return false;
     }
     return evictOne(registry);
-}
-
 }
 
 std::uint64_t UnitShadowBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported) {

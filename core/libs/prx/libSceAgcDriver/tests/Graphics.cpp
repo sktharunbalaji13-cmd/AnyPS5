@@ -7989,7 +7989,7 @@ void unitShadowBudgetTests() {
     using AgcDriver::Graphics::NoteUnitShadowPressure;
     using AgcDriver::Graphics::UnitShadowUnderPressure;
     using AgcDriver::Graphics::WorkingUnitShadowBudgetBytes;
-    Context context{};
+    AgcDriver::Graphics::Context context{};
     context.memory = memory;
     Require(!UnitShadowUnderPressure(), "pressure was active before being noted");
     Require(WorkingUnitShadowBudgetBytes(context) == 1024 * MiB, "without pressure the working budget differed from base budget");
