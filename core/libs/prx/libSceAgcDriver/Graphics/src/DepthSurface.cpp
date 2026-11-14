@@ -215,6 +215,11 @@ std::vector<DepthGuard>& depthGuards() {
     return ranges;
 }
 
+std::uint64_t collectAfterTouch(std::uint64_t address, std::size_t bytes) {
+    for (auto page = address & ~std::uint64_t{4095}; page < address + bytes; page += 4096u) static_cast<void>(*reinterpret_cast<const volatile std::uint8_t*>(std::max(page, address)));
+    return GuestMemory::CollectWritesUncached(address, bytes);
+}
+
 std::atomic<bool>& anyDepthGuard() {
     static std::atomic<bool> any{false};
     return any;
@@ -339,7 +344,7 @@ DepthSamplingState prepareUniformPlaneSampling(const Context& context, const Dep
         StorageTexture::FlushPending(range.address, range.bytes);
         GuestMemory::FlushGpuWrites(range.address, range.bytes);
         if (!GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), range.bytes) || !GuestMemory::Watched(range.address, range.bytes)) return refuse("native multisample depth import requires watched accessible guest memory");
-        range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        range.generation = collectAfterTouch(range.address, range.bytes);
         if (range.generation == 0u) return refuse("native multisample depth import requires tracked generations");
     }
     const auto depthWord = uniformPlaneValue<std::uint32_t>(depth.address, depth.bytes);
@@ -414,7 +419,7 @@ DepthSamplingState prepareDepthSampling(const Context& context, const DepthTarge
         StorageTexture::FlushPending(range.address, range.bytes);
         GuestMemory::FlushGpuWrites(range.address, range.bytes);
         if (!GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), range.bytes) || !GuestMemory::Watched(range.address, range.bytes)) return refuse("native multisample depth import requires watched accessible guest memory");
-        range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        range.generation = collectAfterTouch(range.address, range.bytes);
         if (range.generation == 0u) return refuse("native multisample depth import requires tracked generations");
     }
     std::vector<std::uint32_t> metadata(htile.bytes / sizeof(std::uint32_t));
@@ -1537,7 +1542,7 @@ private:
     PublicationPlane CapturePublication(const GuestMemory::UnchangedQuery& range) {
         PublicationPlane plane;
         plane.range = range;
-        plane.range.generation = GuestMemory::CollectWritesUncached(range.address, range.bytes);
+        plane.range.generation = collectAfterTouch(range.address, range.bytes);
         const auto pages = (range.bytes + PublicationPlane::PageBytes - 1u) / PublicationPlane::PageBytes;
         plane.words.assign(pages, 0u);
         plane.starts.assign(pages, PublicationPlane::Repeated);
