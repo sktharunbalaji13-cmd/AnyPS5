@@ -95,7 +95,7 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
             ready = true;
             return;
         }
-        memory = cache->AllocateMemory(allocation, "vkAllocateMemory buffer");
+        memory = cache->AllocateMemory(allocation, "vkAllocateMemory buffer", context.RefusedDeviceMemoryFallback(requirements.memoryTypeBits, allocation.memoryTypeIndex));
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
         if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory, 0, VK_WHOLE_SIZE, 0, &mapping), "vkMapMemory");

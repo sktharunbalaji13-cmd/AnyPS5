@@ -2064,6 +2064,14 @@ bool GpuMutexType::HeldByThisThread() const {
     return owner.load(std::memory_order_relaxed) == ThreadToken();
 }
 
+const void* GpuMutexType::OwnerThreadToken() const {
+    return owner.load(std::memory_order_relaxed);
+}
+
+const void* GpuMutexType::ThisThreadToken() const {
+    return ThreadToken();
+}
+
 std::uint32_t GpuMutexType::DepthOnThisThread() const {
     // `depth` is written by the holder only, so it is read only when that is this thread.
     return HeldByThisThread() ? depth : 0;

@@ -171,9 +171,24 @@ VkFormat SrgbTwinFormat(const Context& context, VkFormat format);
 // either at once (WriteBack) or deferred: MarkDirty keeps them on the GPU until something reads that
 // memory (FlushPending, through the GuestMemory flush hook), the image is refreshed after a CPU write,
 // or it leaves the cache. Dispatches reusing the image meanwhile skip the round trip entirely.
+// Mission 28: the single-sample surface whose storage image this thread is building right now.
+// The image's own upload reads the guest's bytes over that surface, and the multisample read
+// guard would otherwise resolve the live target into the very image being created: the storage
+// cache that owns the image is already held on this thread, so that re-entry deadlocks (record
+// 32). The creation resolves the target into the image once the image exists instead.
+class StorageSurfaceBuildScope {
+public:
+    StorageSurfaceBuildScope(std::uint64_t address, std::uint64_t bytes);
+    ~StorageSurfaceBuildScope();
+    StorageSurfaceBuildScope(const StorageSurfaceBuildScope&) = delete;
+    StorageSurfaceBuildScope& operator=(const StorageSurfaceBuildScope&) = delete;
+};
+std::uint64_t BuildingStorageSurfaceAddress();
+std::uint64_t BuildingStorageSurfaceBytes();
+
 class StorageTexture : public std::enable_shared_from_this<StorageTexture> {
 public:
-    static std::shared_ptr<StorageTexture> Create(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel);
+    static std::shared_ptr<StorageTexture> Create(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel, std::uint64_t mirrorSurfaceBytes = 0);
     ~StorageTexture();
     StorageTexture(const StorageTexture&) = delete;
     StorageTexture& operator=(const StorageTexture&) = delete;
@@ -208,10 +223,27 @@ public:
     // with a pending unit inside the range are stored (APS5_NO_FLUSH_PRETEST=1 lists every
     // overlapping pending image, as before).
     static bool FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr, const char* reason = "memory access", PublishScope scope = PublishScope::Whole, bool* published = nullptr);
+    // Whether an image overlapping the range is being stored right now by another thread's
+    // FlushPending: the images leave the pending list for the store, so a second flush or a
+    // reader of the same range finds nothing pending while the store is still running and would
+    // read guest memory before the store. This waits for that store to finish and reports whether
+    // it had to.
+    static bool WaitForFlushing(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr);
     static void FlushAllPending(const char* reason);
     static void SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes);
     static constexpr std::uint64_t SmallStoreBytes = 64 * 1024;
+    // The surfaces above the small cap were never published by the flip hook. The guest's own
+    // read of the range publishes them anyway (the memory-access hook), so publishing them at
+    // the flip as well is a second copy of the same work; it is therefore opt-in
+    // (APS5_STORE_LARGE_AT_FLIP=1) and adds GPU retile work per frame without changing what the
+    // guest sees. The large cap bounds what one flip may publish.
+    static constexpr std::uint64_t LargeStoreBytes = 64 * 1024 * 1024;
     static std::size_t StoreSmallPending(const char* reason);
+    // The pending surfaces above the small cap and under the large one, published to guest
+    // memory. Only the host-imported ones are published: their store is recorded into the
+    // recorder's open batch, so the flip hook does not wait for the GPU; a surface whose memory
+    // is not imported would cost a synchronous copy, which the flip hook must not do.
+    static std::size_t StoreLargePending(const char* reason);
     static bool AnyPending();
     static void FlushDumpSelected(const char* reason);
     static bool StoreAtFlipRequested(const char* value);
@@ -359,6 +391,9 @@ public:
     // GuestMemory::GpuMutex only, as Refresh is; never from a build's stage A.
     DccKeys UploadedKeys() const { return uploadedKeys; }
     DccKeys FilledKeys() const { return filledKeys; }
+    bool HasWritesSinceFill() const { return writes > writesAtFill; }
+    std::uint64_t Writes() const { return writes; }
+    std::uint64_t WritesAtFill() const { return writesAtFill; }
     bool GuestSnapshotValid() const { return originalHolds(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)); }
     DccKeyProof& KeyProof() const { return keyProof; }
     DccRangeProof& TargetKeyProof() const { return targetKeyProof; }
@@ -371,6 +406,9 @@ public:
     static std::uint64_t SinglePassMoves();
     static std::uint64_t SlabRetiles();
     static std::uint64_t RefreshesProved();
+    static std::uint64_t ClearHandOvers();
+    static std::uint64_t HandedOverSuperseded();
+    static void SetClearHandOver(bool enabled);
     static std::uint64_t UntrackedCompares();
     std::uint64_t GuestBytes() const;
     std::uint64_t BudgetBytes() const;
@@ -510,6 +548,11 @@ private:
     // stays responsible for storing them until this image's own results supersede them
     // (markLayersPending). APS5_NO_ALIAS_BORROW=1 stores and re-reads as before.
     std::shared_ptr<StorageTexture> pendingAlias() const;
+    // The keys of an image whose upload is a GPU clear (its DCC keys are a clear code) over memory
+    // where other images still have results pending: those results stay pending instead of being
+    // stored, because the clear reads none of that memory. The image's own write supersedes them.
+    std::optional<DccKeys> clearHandOver();
+    void supersedeHandedOver(std::uint32_t first, std::uint32_t count);
     // The pending images FlushPending(address, bytes) would store (not the one a Refresh validates,
     // a pending unit inside the range), kept alive across the caller's use.
     static std::vector<std::shared_ptr<StorageTexture>> overlappingPending(std::uint64_t address, std::size_t bytes);
@@ -590,6 +633,10 @@ private:
     std::weak_ptr<StorageTexture> borrowedFrom;
     std::uint64_t borrowedVersion = 0;
     std::vector<bool> borrowedUnits;
+    // The images whose pending results this image's clear-key upload took over (see clearHandOver),
+    // at their write count then, and the units of this image whose results they now cover.
+    std::vector<std::pair<std::weak_ptr<StorageTexture>, std::uint64_t>> handedOver;
+    std::vector<bool> handedUnits;
     // Units of this image were borrowed since it was last written: the borrower's proofs
     // (the resource cache's serial memo) hold only while this image's version does, so the next
     // write here bumps the pending serial although the image was pending already.
@@ -615,6 +662,10 @@ private:
     // Results are on the GPU only (guarded by the pending-write registry lock).
     bool dirty = false;
     std::uint64_t version = 0;
+    // The number of writes to this image, so a hand-over can tell an image written again since
+    // (see clearHandOver).
+    std::uint64_t writes = 0;
+    std::uint64_t writesAtFill = 0;
     // Mission 5: stable creation identity (see Id()).
     std::uint64_t id = 0;
     // `original` holds the guest bytes; false after a GPU-side clear, which never read them.

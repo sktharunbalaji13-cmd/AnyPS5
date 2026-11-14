@@ -269,6 +269,10 @@ struct VulkanDevice::State {
     VkCommandPool pool = VK_NULL_HANDLE;
     void* window = nullptr;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
+    // The surface's creator, kept so that a lost surface can be replaced on the same window.
+    VkSurfaceKHR (*createSurface)(void* context, VkInstance instance) = nullptr;
+    // The presentation system lost the surface: it is replaced before the next frame.
+    bool surfaceLost = false;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkExtent2D extent{};
     std::vector<VkImage> images;
@@ -688,8 +692,7 @@ struct VulkanDevice::State {
         for (std::uint32_t y = 0; y < height; ++y) {
             for (std::uint32_t x = 0; x < width; ++x) std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 4, full.data() + (static_cast<std::size_t>(y) * scale * slot.dumpWidth + static_cast<std::size_t>(x) * scale) * 4, 4);
         }
-        static const auto start = std::chrono::steady_clock::now();
-        std::fprintf(stderr, "[gpu] frame_%03d.bmp: %ux%u display read back on the GPU at %.1f s\n", index, slot.dumpWidth, slot.dumpHeight, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        std::fprintf(stderr, "[gpu] frame_%03d.bmp: %ux%u display read back on the GPU at %.1f s\n", index, slot.dumpWidth, slot.dumpHeight, AgcDriver::RunElapsedSeconds());
         dumpWriter.Enqueue(index, width, height, 1, std::move(pixels));
     }
 
@@ -1033,6 +1036,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     check(state->InstanceFunction<PFN_vkCreateInstance>("vkCreateInstance")(&create, nullptr, &state->instance), "vkCreateInstance");
     APS5_LOG_OUT("Vulkan instance created instance=%p", reinterpret_cast<void*>(state->instance));
     if (window != nullptr) {
+        state->createSurface = window->createSurface;
         state->surface = window->createSurface(window->context, state->instance);
         require(state->surface != VK_NULL_HANDLE, "window returned a null surface");
         state->window = window->context;
@@ -1370,6 +1374,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     // Indirect draws with a GPU-side count (DRAW_INDIRECT_MULTI with count_indirect); a device
     // without it resolves such draws on the CPU.
     state->drawIndirectCount = hasExtension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+    std::fprintf(stderr, "[import-diag] VK_EXT_external_memory_host available=%d hostImportAlignment will be queried if available\\n", hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) ? 1 : 0);
     if (state->drawIndirectCount) deviceExtensions.push_back(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
     state->memoryBudget = hasExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     // Guest memory is host memory: importing it lets address-based shaders use it in place instead of
@@ -1922,6 +1927,16 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     }
     deviceInfo.pNext = &bdaFeatures;
+    VkDeviceDiagnosticsConfigCreateInfoNV diagnosticsConfig{VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV};
+    static const bool diagnosticsRequested = std::getenv("APS5_NV_DIAGNOSTICS") != nullptr;
+    if (diagnosticsRequested && hasExtension(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME)) {
+        diagnosticsConfig.flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;
+        diagnosticsConfig.pNext = deviceInfo.pNext;
+        deviceInfo.pNext = &diagnosticsConfig;
+        deviceExtensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+        deviceInfo.enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size());
+        deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    }
     auto shaderProfile = std::make_unique<const ShaderDeviceProfile>(buildTarget(), deviceInfo, state->properties.limits);
     check(state->InstanceFunction<PFN_vkCreateDevice>("vkCreateDevice")(selected, &deviceInfo, nullptr, &state->device), "vkCreateDevice");
     state->shaderProfile = std::move(shaderProfile);
@@ -2786,8 +2801,49 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
         state->extent = {0, 0};
         return;
     }
+    // A lost surface is replaced here: the presentation continues on the new one instead of
+    // ending the run.
+    if (state->surfaceLost) {
+        state->surfaceLost = false;
+        if (!recreateSurface(width, height)) {
+            state->extent = {0, 0};
+            return;
+        }
+        return;
+    }
     if (state->extent.width == width && state->extent.height == height) return;
     recreateSwapchain(width, height, false);
+}
+
+// A surface the presentation system lost is replaced: the swapchain made from it and its
+// semaphores go first (a swapchain must not outlive its surface), then the surface itself, and
+// a new surface and swapchain are made for the same window. The presentation continues.
+bool VulkanDevice::recreateSurface(std::uint32_t width, std::uint32_t height) {
+    if (state->createSurface == nullptr || state->window == nullptr) return false;
+    WaitIdle();
+    state->DestroyRetiredSwapchains();
+    const auto destroySemaphore = state->DeviceFunction<PFN_vkDestroySemaphore>("vkDestroySemaphore");
+    for (auto& semaphore : state->rendered) {
+        if (semaphore) destroySemaphore(state->device, semaphore, nullptr);
+    }
+    state->rendered.clear();
+    if (state->swapchain != VK_NULL_HANDLE) {
+        state->DeviceFunction<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(state->device, state->swapchain, nullptr);
+        state->swapchain = VK_NULL_HANDLE;
+    }
+    state->images.clear();
+    if (state->surface != VK_NULL_HANDLE) {
+        state->InstanceFunction<PFN_vkDestroySurfaceKHR>("vkDestroySurfaceKHR")(state->instance, state->surface, nullptr);
+        state->surface = VK_NULL_HANDLE;
+    }
+    state->surface = state->createSurface(state->window, state->instance);
+    if (state->surface == VK_NULL_HANDLE) {
+        std::fprintf(stderr, "[gpu] the presentation surface could not be replaced\n");
+        return false;
+    }
+    std::fprintf(stderr, "[gpu] the presentation surface was replaced\n");
+    recreateSwapchain(width, height, true);
+    return true;
 }
 
 void VulkanDevice::recreateSwapchain(std::uint32_t width, std::uint32_t height, bool force) {
@@ -2830,6 +2886,7 @@ void VulkanDevice::recreateSwapchain(std::uint32_t width, std::uint32_t height, 
     VkSwapchainKHR replacement = VK_NULL_HANDLE;
     check(state->DeviceFunction<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(state->device, &create, nullptr, &replacement), "vkCreateSwapchainKHR resize");
     state->retiredSwapchains.push_back({state->swapchain, std::move(state->rendered)});
+    state->rendered.assign(state->images.size(), VK_NULL_HANDLE);
     state->swapchain = replacement;
     state->extent = create.imageExtent;
     auto getImages = state->DeviceFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");
@@ -2946,7 +3003,7 @@ void VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std:
     static int dumped = 0;
     if (frameDumpOutput.Enabled_nid_no_patch() && dumped < dumpLimit) {
         char name[32];
-        std::snprintf(name, sizeof(name), "frame_%03d.bmp", dumped++);
+        FrameDumpFileName(name, sizeof(name), dumped++);
         frameDumpOutput.Write_nid_no_patch(name, width, height, pixels);
     }
     // Tests and tools present pixels synchronously; the game path splits the steps (see Driver::Present).
@@ -2983,7 +3040,7 @@ void WriteFrameBmp(int index, std::uint32_t fullWidth, std::uint32_t fullHeight,
         for (std::uint32_t x = 0; x < width; ++x) std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 4, full.data() + (static_cast<std::size_t>(y) * scale * fullWidth + x * scale) * 4, 4);
     }
     char name[32];
-    std::snprintf(name, sizeof(name), "frame_%03d.bmp", index);
+    FrameDumpFileName(name, sizeof(name), index);
     frameDumpOutput.Write_nid_no_patch(name, width, height, pixels);
 }
 
@@ -3006,6 +3063,9 @@ std::shared_ptr<Graphics::StorageTexture> PresentableResident(const Graphics::Co
     pending = resident != nullptr;
     convert = false;
     layer = 0;
+    if (resident == nullptr) {
+        resident = Graphics::StorageTexture::FindLive(buffer.address, DisplayBufferSize(buffer));
+    }
     if (resident == nullptr) return resident;
     const auto path = ResidentPresentable(context, *resident, buffer, filter, layer);
     if (path == ResidentPresent::None) resident.reset();
@@ -3026,7 +3086,12 @@ bool ResidentServesDisplay(const Graphics::StorageTexture& resident, const Displ
         std::snprintf(message, sizeof(message), "VideoOut: display buffer 0x%llx reads register-clear DCC keys at 0x%llx over the pending image 0x%llx (DCC 0x%llx, filled keys %s): whether its results precede the clear is not modeled", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(buffer.dccAddress), static_cast<unsigned long long>(resident.Descriptor().baseAddress), static_cast<unsigned long long>(resident.Descriptor().dccAddress), Graphics::DccKeysName(resident.FilledKeys()));
         throw std::runtime_error(message);
     }
-    if (Graphics::IsDccClear(resident.FilledKeys()) && resident.FilledKeys() == keys) return false;
+    if (Graphics::IsDccClear(resident.FilledKeys()) && resident.FilledKeys() == keys && !resident.HasWritesSinceFill()) {
+        if (std::getenv("APS5_TRACE_DCC_KEYS") != nullptr) {
+            std::fprintf(stderr, "[dcc-keys] display gate refuses: display buffer 0x%llx (DCC 0x%llx) reads %s, the resident image 0x%llx (DCC 0x%llx) has filled %s uploaded %s\n", static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(buffer.dccAddress), Graphics::DccKeysName(keys), static_cast<unsigned long long>(resident.Descriptor().baseAddress), static_cast<unsigned long long>(resident.Descriptor().dccAddress), Graphics::DccKeysName(resident.FilledKeys()), Graphics::DccKeysName(resident.UploadedKeys()));
+        }
+        return false;
+    }
     return Graphics::KeysServeSurface(resident.Descriptor().dccAddress, resident.UploadedKeys(), resident.FilledKeys(), buffer.dccAddress, [&] { return ResidentKeys(resident); }, [&] { return keys; });
 }
 
@@ -3058,73 +3123,79 @@ bool NoResidentPresent() {
 // Debug aid: APS5_DUMP_FRAMES=<n> saves the first n presented display buffers as frame_<index>.bmp,
 // read back by the blit's own submission and written after its fence (RetireSlot), or with
 // APS5_NO_GPU_DUMP=1 decoded from the tiled guest buffer on the CPU, as before.
-struct FrameDumps {
-    int limit;
-    bool cpu;
-    int every = 1;
-    int dumped = 0;
-    std::uint64_t presents = 0;
-    // Mission 4: opt-in capture times in seconds. When the list is not empty it replaces the
-    // count/spacing rule, so a run captures at most one frame per listed time.
-    std::vector<double> at;
-    std::size_t nextAt = 0;
-};
-
-FrameDumps& Dumps() {
-    static FrameDumps dumps{[] {
-        const char* value = std::getenv("APS5_DUMP_FRAMES");
-        return value ? std::atoi(value) : 0;
-    }(), std::getenv("APS5_NO_GPU_DUMP") != nullptr, [] {
-        const char* value = std::getenv("APS5_DUMP_FRAMES_EVERY");
-        return value ? std::max(std::atoi(value), 1) : 1;
-    }(), 0, 0, AgcDriver::ParseDumpTimes(std::getenv("APS5_DUMP_FRAMES_AT")), 0};
-    return dumps;
+//
+// APS5_DUMP_FRAMES_AT=<seconds,...> selects the moments instead of the count and
+// APS5_DUMP_FRAMES_EVERY=<n> the spacing in presents. The plan (FrameDumpSchedule.hpp) holds
+// that decision and the file numbering, so that both can be unit tested without a GPU.
+CapturePlan& Dumps() {
+    static CapturePlan plan = AgcDriver::CapturePlanFromEnvironment();
+    return plan;
 }
 
-// Seconds since the first dump decision, used by the APS5_DUMP_FRAMES_AT schedule.
-double FrameDumpElapsedSeconds() {
-    static const auto started = std::chrono::steady_clock::now();
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-}
-
-// True when the present in progress should be captured. Without a time schedule this is the
-// existing count/spacing rule, unchanged; with one it is the time schedule alone.
-bool DumpDueNow(FrameDumps& dumps) {
-    if (!frameDumpOutput.Enabled_nid_no_patch() || dumps.dumped >= dumps.limit) return false;
-    if (!dumps.at.empty()) {
-        ++dumps.presents;
-        return AgcDriver::DumpDue(dumps.at, FrameDumpElapsedSeconds(), dumps.nextAt);
+// Reserves the capture of the present in progress and gives the reserved index back when the
+// present does not happen: a present that is dropped must not consume a file index.
+class DumpReservation {
+public:
+    DumpReservation(CapturePlan& plan, bool reserved) : plan_(plan), reserved_(reserved) {}
+    ~DumpReservation() {
+        if (reserved_) plan_.Release();
     }
-    return (++dumps.presents % static_cast<std::uint64_t>(dumps.every)) == 0;
-}
+    DumpReservation(const DumpReservation&) = delete;
+    DumpReservation& operator=(const DumpReservation&) = delete;
+    void Commit() {
+        if (!reserved_) return;
+        plan_.Commit();
+        reserved_ = false;
+    }
+
+private:
+    CapturePlan& plan_;
+    bool reserved_;
+};
 
 }
 
 bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
-    static const bool storeAtFlip = Graphics::StorageTexture::StoreAtFlipRequested(std::getenv("APS5_STORE_AT_FLIP"));
-    if (storeAtFlip) Graphics::StorageTexture::FlushAllPending("flip");
-    else Graphics::StorageTexture::FlushDumpSelected("flip");
+    static const bool tracePath = std::getenv("APS5_TRACE_PRESENT_PATH") != nullptr;
+    if (tracePath) {
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 6) std::fprintf(stderr, "[present-path] 0x%llx tiling=%u %ux%u format=0x%llx\n", static_cast<unsigned long long>(buffer.address), buffer.tilingMode, buffer.width, buffer.height, static_cast<unsigned long long>(buffer.pixelFormat));
+    }
+    // Presenting from guest memory (resident == nullptr) must read GPU-flushed results; flushing all
+    // pending storage images before the detiler upload prevents stale/unflushed guest bytes from
+    // overwriting or replacing rendered content.
+    Graphics::StorageTexture::FlushAllPending("flip");
     auto& dumps = Dumps();
     const bool passthrough = state->surfaceColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
     require(!passthrough || DisplayPq(buffer.pixelFormat), "only a PQ display buffer is presented to the HDR10 swapchain");
     if (buffer.tilingMode == 1) {
         if (passthrough) ensureHdrScaler(DisplayTexelFormat(buffer.pixelFormat));
         const auto pixels = passthrough ? ReadDisplayBufferTexels(buffer) : ReadDisplayBuffer(buffer);
-        bool dumpFrame = false;
-        if (DumpDueNow(dumps)) {
+        // The capture is reserved before the present: its index is consumed once the present is
+        // on its way (Commit) and given back when the present is dropped (the reservation).
+        const bool dumpFrame = frameDumpOutput.Enabled_nid_no_patch() && dumps.Reserve(AgcDriver::RunElapsedSeconds());
+        DumpReservation reservation(dumps, dumpFrame);
+        const int dumpIndex = dumps.Index();
+        // Exactly one path writes the file: the CPU write below, or the GPU read back inside
+        // present(). Both writing it would leave the GPU's file over the CPU's, and the two
+        // hold different content (the guest's memory against the device's image).
+        bool gpuDump = false;
+        if (dumpFrame) {
             if (passthrough) {
-                WriteFrameBmp(dumps.dumped++, buffer.width, buffer.height, ReadDisplayBuffer(buffer), DumpScale());
+                WriteFrameBmp(dumpIndex, buffer.width, buffer.height, ReadDisplayBuffer(buffer), DumpScale());
+                reservation.Commit();
             } else if (dumps.cpu) {
-                WriteFrameBmp(dumps.dumped++, buffer.width, buffer.height, pixels, DumpScale());
+                WriteFrameBmp(dumpIndex, buffer.width, buffer.height, pixels, DumpScale());
+                reservation.Commit();
             } else {
-                state->nextDumpIndex = dumps.dumped++;
-                dumpFrame = true;
+                state->nextDumpIndex = dumpIndex;
+                gpuDump = true;
             }
         }
-        if (!present(buffer.width, buffer.height, true, pixels, nullptr, nullptr, VK_FILTER_LINEAR, dumpFrame, false, nullptr, 0, passthrough)) {
-            if (dumpFrame) --dumps.dumped;
+        if (!present(buffer.width, buffer.height, true, pixels, nullptr, nullptr, VK_FILTER_LINEAR, gpuDump, false, nullptr, 0, passthrough)) {
             return false;
         }
+        reservation.Commit();
         return true;
     }
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -3146,11 +3217,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
             resident.reset();
             convert = false;
         }
-        if (!pending) {
-            ++notPending;
-        } else if (resident == nullptr) {
-            ++unsuitable;
-        } else {
+        if (resident != nullptr) {
             // 64 KiB blocks the CPU wrote since the image last matched guest memory would be shown
             // stale (the write-back keeps the CPU's bytes for them): Refresh merges them into the
             // image first, as a sampled texture of the image would (see cachedTexture). The uncached
@@ -3164,6 +3231,10 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
                 ++refreshedPresents;
             }
             ++residentPresents;
+        } else if (pending) {
+            ++unsuitable;
+        } else {
+            ++notPending;
         }
     }
     const auto cleared = buffer.dccAddress != 0 && resident == nullptr ? CompressedClearPixel(buffer, bytes) : std::nullopt;
@@ -3175,8 +3246,19 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         const auto residentId = resident != nullptr ? resident->Id() : 0ull;
         const auto residentAddress = resident != nullptr ? resident->Descriptor().baseAddress : 0ull;
         const bool sameSurface = resident != nullptr && residentAddress == buffer.address;
-        Aps5Diag::Event("present-map", "display_addr=0x%llx %ux%u resident_id=%llu resident_addr=0x%llx resident_extent=%ux%u path=%s same_surface=%d",
+        // The display buffer's own DCC address and the bytes there, and the resident image's: the
+        // two key models (the surface's descriptor and the VideoOut buffer's) must agree.
+        const auto* const dccBytes = reinterpret_cast<const std::uint8_t*>(buffer.dccAddress);
+        const bool dccReadable = buffer.dccAddress != 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(buffer.dccAddress), 8);
+        Aps5Diag::Event("present-map", "display_addr=0x%llx %ux%u display_dcc=0x%llx display_keys=%s dcc_bytes=%02x%02x%02x%02x%02x%02x%02x%02x surface_dcc=0x%llx surface_filled=%s surface_uploaded=%s resident_id=%llu resident_addr=0x%llx resident_extent=%ux%u path=%s same_surface=%d",
                         static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height,
+                        static_cast<unsigned long long>(buffer.dccAddress),
+                        Graphics::DccKeysName(DisplayBufferKeys(buffer)),
+                        dccReadable ? dccBytes[0] : 0u, dccReadable ? dccBytes[1] : 0u, dccReadable ? dccBytes[2] : 0u, dccReadable ? dccBytes[3] : 0u,
+                        dccReadable ? dccBytes[4] : 0u, dccReadable ? dccBytes[5] : 0u, dccReadable ? dccBytes[6] : 0u, dccReadable ? dccBytes[7] : 0u,
+                        resident != nullptr ? static_cast<unsigned long long>(resident->Descriptor().dccAddress) : 0ull,
+                        resident != nullptr ? Graphics::DccKeysName(resident->FilledKeys()) : "-",
+                        resident != nullptr ? Graphics::DccKeysName(resident->UploadedKeys()) : "-",
                         static_cast<unsigned long long>(residentId),
                         static_cast<unsigned long long>(residentAddress),
                         resident != nullptr ? resident->Descriptor().width : 0,
@@ -3184,15 +3266,22 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
                         resident == nullptr ? "guest-memory" : (convert ? "convert" : "blit"),
                         sameSurface ? 1 : 0);
     }
-    bool dumpFrame = false;
-    if (DumpDueNow(dumps)) {
+    const bool dumpFrame = frameDumpOutput.Enabled_nid_no_patch() && dumps.Reserve(AgcDriver::RunElapsedSeconds());
+    DumpReservation reservation(dumps, dumpFrame);
+    const int dumpIndex = dumps.Index();
+    // Exactly one path writes the file: the CPU write below, or the GPU read back inside
+    // present(). Both writing it would leave the GPU's file over the CPU's, and the two
+    // hold different content (the guest's memory against the device's image).
+    bool gpuDump = false;
+    if (dumpFrame) {
         if (dumps.cpu || (passthrough && resident == nullptr)) {
             auto full = cleared ? std::vector<std::byte>(static_cast<std::size_t>(buffer.width) * buffer.height * cleared->size()) : ReadDisplayBuffer(buffer);
             for (std::size_t offset = 0; cleared && offset < full.size(); offset += cleared->size()) std::memcpy(full.data() + offset, cleared->data(), cleared->size());
-            WriteFrameBmp(dumps.dumped++, buffer.width, buffer.height, full, DumpScale());
+            WriteFrameBmp(dumpIndex, buffer.width, buffer.height, full, DumpScale());
+            reservation.Commit();
         } else {
-            state->nextDumpIndex = dumps.dumped++;
-            dumpFrame = true;
+            state->nextDumpIndex = dumpIndex;
+            gpuDump = true;
             ++gpuDumps;
         }
     }
@@ -3209,11 +3298,12 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         const auto channel = [&](std::size_t index) { return static_cast<float>(std::to_integer<unsigned>((*cleared)[index])) / 255.0f; };
         uniform = {{channel(2), channel(1), channel(0), channel(3)}};
     }
-    if (!present(buffer.width, buffer.height, true, {}, cleared ? nullptr : &buffer, resident, filter, dumpFrame, convert, cleared ? &uniform : nullptr, layer, passthrough)) {
-        // A dropped frame (swapchain out of date) keeps the dump numbering contiguous.
-        if (dumpFrame) --dumps.dumped;
+    if (!present(buffer.width, buffer.height, true, {}, cleared ? nullptr : &buffer, resident, filter, gpuDump, convert, cleared ? &uniform : nullptr, layer, passthrough)) {
+        // A dropped frame (swapchain out of date) keeps the dump numbering contiguous: the
+        // reservation gives the reserved index back.
         return false;
     }
+    reservation.Commit();
     return true;
 }
 
@@ -3418,7 +3508,7 @@ bool VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             Aps5Diag::Event("frame", "dump=%d present=%llu image=%u batch=%llu slot=%zu width=%u height=%u scale=%u elapsed=%.3f stage=%s",
                             state->nextDumpIndex, static_cast<unsigned long long>(presentCounters.presents + 1), index,
                             static_cast<unsigned long long>(batchesAtBlit), state->presentCursor, slot.dumpWidth,
-                            slot.dumpHeight, scale, FrameDumpElapsedSeconds(),
+                            slot.dumpHeight, scale, AgcDriver::RunElapsedSeconds(),
                             drawn ? "presentation-pass" : (direct ? "resident-blit" : "scaler-readback"));
         }
         if (resident != nullptr) {
@@ -3574,7 +3664,13 @@ void VulkanDevice::QueuePresent() {
     present.pImageIndices = &index;
     const auto presented = state->DeviceFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(state->queue, &present);
     if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) state->extent = {0, 0};
-    else check(presented, "vkQueuePresentKHR");
+    else if (presented == VK_ERROR_SURFACE_LOST_KHR) {
+        // The presentation system lost the surface (the window was replaced or the display
+        // changed). The surface is replaced before the next frame; the run continues.
+        std::fprintf(stderr, "[gpu] the presentation surface was lost\n");
+        state->surfaceLost = true;
+        state->extent = {0, 0};
+    } else check(presented, "vkQueuePresentKHR");
     timing.Mark("queue_present");
     APS5_LOG_OUT_DEBUG("vkQueuePresentKHR queued imageIndex=%u", index);
 }
@@ -3591,6 +3687,28 @@ std::string VulkanDevice::DeviceName() const {
 
 std::string VulkanDevice::DriverInfo() const {
     return state->driverInfo.empty() ? std::to_string(state->properties.driverVersion) : state->driverInfo;
+}
+
+void VulkanDevice::ReportMemoryBudget(const char* where) const {
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &reported};
+    if (state->memoryBudget && state->instance != VK_NULL_HANDLE && state->physical != VK_NULL_HANDLE) {
+        if (const auto query = state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2"); query != nullptr) query(state->physical, &properties);
+    }
+    std::string line;
+    char part[192];
+    for (std::uint32_t heap = 0; heap < state->memoryProperties.memoryHeapCount; ++heap) {
+        const auto& described = state->memoryProperties.memoryHeaps[heap];
+        const bool local = (described.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+        if (state->memoryBudget) {
+            std::snprintf(part, sizeof(part), " heap%u%s size=%lluMiB budget=%lluMiB usage=%lluMiB", heap, local ? "(device-local)" : "",
+                          static_cast<unsigned long long>(described.size >> 20u), static_cast<unsigned long long>(reported.heapBudget[heap] >> 20u), static_cast<unsigned long long>(reported.heapUsage[heap] >> 20u));
+        } else {
+            std::snprintf(part, sizeof(part), " heap%u%s size=%lluMiB", heap, local ? "(device-local)" : "", static_cast<unsigned long long>(described.size >> 20u));
+        }
+        line += part;
+    }
+    std::fprintf(stderr, "[memory] %s:%s\n", where, line.c_str());
 }
 
 bool VulkanDevice::CalibrateClock(double& gpuNs, std::chrono::steady_clock::time_point& cpu) const {
@@ -4663,6 +4781,7 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
 void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     auto& d = Dispatches();
     auto& recorder = *state->recorder;
+    recorder.NoteBatchProgram(record.programAddress);
     auto& timer = *record.timer;
     const auto& context = *record.context;
     auto& resources = *record.resources;

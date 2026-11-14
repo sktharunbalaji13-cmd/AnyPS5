@@ -90,6 +90,7 @@ int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* pa
     if (index != 0) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
     }
+    if (std::getenv("APS5_TRACE_VIDEOOUT") != nullptr) std::fprintf(stderr, "[videoout-open] busType=%d index=%d\n", busType, index);
     const int handle = VideoOutDriver::Get().Open(busType);
     if (handle < 0) return VIDEO_OUT_ERROR_RESOURCE_BUSY;
     return handle;

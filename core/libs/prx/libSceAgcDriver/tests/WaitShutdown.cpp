@@ -91,7 +91,7 @@ void CheckCommandBufferSubmission() {
     Require(multiRejected, "unsupported queue context for multi submit was not rejected");
 }
 
-void CheckShutdownCancellation() {
+void CheckShutdownCancellation(std::chrono::milliseconds linger = std::chrono::seconds(1)) {
     static std::array<LabelState, 3> states{};
     constexpr std::array<std::uint32_t, 3> queues{0, 0x20, 0x28};
     for (std::size_t index = 0; index < queues.size(); ++index) {
@@ -106,7 +106,7 @@ void CheckShutdownCancellation() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(linger);
     for (const auto& state : states) {
         Require(state.label == 0, "unsatisfied label was unexpectedly signalled");
         Require(state.after == 0 && state.queued == 0, "unsatisfied wait completed before shutdown");
@@ -134,7 +134,8 @@ int main(int argc, char** argv) {
     }
     try {
         CheckCommandBufferSubmission();
-        CheckShutdownCancellation();
+        const bool longWait = argc == 2 && std::strcmp(argv[1], "--long-unsatisfied") == 0;
+        CheckShutdownCancellation(longWait ? std::chrono::milliseconds(6500) : std::chrono::milliseconds(1000));
         std::puts("unsatisfied label waits cancelled cleanly at shutdown");
         return 0;
     } catch (const std::exception& error) {

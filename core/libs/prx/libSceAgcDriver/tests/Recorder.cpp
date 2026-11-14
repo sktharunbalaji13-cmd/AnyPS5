@@ -6780,6 +6780,216 @@ bool pendingKeyStoreTests(const Device& device, Recorder& recorder) {
     return true;
 }
 
+bool clearHandOverTests(const Device& device, Recorder& recorder, bool watched) {
+    const auto& base = device.GetContext();
+    const std::string what = watched ? "clear-key hand-over (watched)" : "clear-key hand-over";
+    if (base.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: " << what << " not tested\n";
+        return false;
+    }
+    constexpr std::size_t surfaceA = 256 * 256 * 4;
+    constexpr std::size_t surfaceB = 128 * 128 * 8;
+    constexpr std::size_t keyCount = surfaceB / 256;
+    constexpr std::size_t bytes = surfaceA + 65536;
+    static_assert(surfaceB <= surfaceA && keyCount <= bytes - surfaceA, "B lies over the first units of A, and B's DCC keys follow A inside the block");
+    const auto decided = PrepareImportWatch(base);
+#ifndef _WIN32
+    if (watched && decided == ImportWatch::Unwatch) {
+        std::cout << "host imports are compared on this device: " << what << " not tested\n";
+        return false;
+    }
+#endif
+    void* block = nullptr;
+    if (watched) {
+        block = AllocateWatched(bytes, 65536);
+        if (block == nullptr) {
+            std::cout << "no write watching: " << what << " not tested\n";
+            return false;
+        }
+    } else {
+#ifdef _WIN32
+        block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+        block = std::aligned_alloc(65536, bytes);
+#endif
+    }
+    Require(block != nullptr && reinterpret_cast<std::uint64_t>(block) % 65536 == 0, "cannot allocate the clear-key hand-over block");
+    if (watched) SetImportWatch(base, ImportWatch::Watch);
+    struct RestoreWatch {
+        const Context& context;
+        ImportWatch decided;
+        ~RestoreWatch() { SetImportWatch(context, decided); }
+    } restoreWatch{base, decided};
+    auto* memory = static_cast<std::uint8_t*>(block);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        bool watched;
+        ~Unregister() {
+            StorageTexture::SetClearHandOver(true);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+            if (watched) ReleaseWatched(block, bytes);
+        }
+    } unregister{base, block, address, watched};
+    if (HostImportFor(base, address, bytes) == nullptr) {
+        std::cout << "host import of the clear-key hand-over block refused: " << what << " not tested\n";
+        return false;
+    }
+    if (watched && !AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "the imported block left the write watch: " << what << " not tested\n";
+        return false;
+    }
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    const auto surface = [&](std::uint32_t width, std::uint32_t height, std::uint32_t format, std::uint64_t dcc) {
+        GuestTextureResource resource{};
+        resource.baseAddress = address;
+        resource.width = width;
+        resource.height = height;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kR64KBX;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = format;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        resource.dccAddress = dcc;
+        return resource;
+    };
+    const auto resourceA = surface(256, 256, 56, 0);
+    const auto resourceB = surface(128, 128, 71, address + surfaceA);
+    Require(DescribeSurface(resourceA).guestBytes == surfaceA && DescribeSurface(resourceB).guestBytes == surfaceB, "the clear-key hand-over surfaces have unexpected sizes");
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    const auto draw = [&](const std::shared_ptr<StorageTexture>& image, VkClearColorValue value) {
+        const auto commands = recorder.Commands();
+        recorder.Keep(image);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        image->MarkDirty();
+    };
+    const auto readImage = [&](const std::shared_ptr<StorageTexture>& image, std::uint32_t width, std::uint32_t height, std::size_t texelBytes) {
+        Buffer readback(context, static_cast<std::size_t>(width) * height * texelBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        const auto commands = recorder.Commands();
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {width, height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        const auto pixels = readback.Bytes();
+        return std::vector<std::byte>(pixels.begin(), pixels.end());
+    };
+    const auto readMemory = [&](std::uint64_t from, std::size_t length) {
+        std::vector<std::byte> read(length);
+        AgcDriver::GuestMemory::Read(from, read);
+        recorder.Sync();
+        if (!watched) std::memcpy(read.data(), memory + (from - address), length);
+        return read;
+    };
+    const auto filled = [](std::span<const std::byte> read, std::span<const std::uint8_t> texel) {
+        for (std::size_t i = 0; i < read.size(); ++i) {
+            if (std::to_integer<std::uint8_t>(read[i]) != texel[i % texel.size()]) return false;
+        }
+        return true;
+    };
+    constexpr std::array<std::uint8_t, 4> red{255, 0, 0, 255};
+    constexpr std::array<std::uint8_t, 4> blue{0, 0, 255, 255};
+    constexpr std::array<std::uint8_t, 8> green{0, 0, 0x00, 0x3c, 0, 0, 0x00, 0x3c};
+    constexpr std::array<std::uint8_t, 8> cleared{};
+    enum class Order { Superseded, ReadFirst, Rewritten, CpuStore };
+    struct Outcome {
+        std::vector<std::byte> bytes;
+        std::vector<std::byte> imageB;
+        std::uint64_t handOvers = 0;
+        std::uint64_t superseded = 0;
+    };
+    const auto run = [&](bool on, Order order) {
+        const std::string where = what + (order == Order::Superseded ? ", A never read again" : order == Order::ReadFirst ? ", A read before B wrote" : order == Order::Rewritten ? ", A written again after the hand-over" : ", a CPU store before B wrote") + (on ? ", on" : ", off");
+        StorageTexture::SetClearHandOver(on);
+        recorder.Sync();
+        std::memset(memory, 0x55, surfaceA);
+        std::memset(memory + surfaceA, 0x00, keyCount);
+        Outcome outcome{};
+        const auto handOvers = StorageTexture::ClearHandOvers();
+        const auto superseded = StorageTexture::HandedOverSuperseded();
+        {
+            auto imageA = StorageTexture::Create(context, detiler, resourceA, 0);
+            auto imageB = StorageTexture::Create(context, detiler, resourceB, 0);
+            draw(imageA, {{1.0f, 0.0f, 0.0f, 1.0f}});
+            imageB->Refresh();
+            if (on && watched) {
+                Require(StorageTexture::ClearHandOvers() == handOvers + 1, where + ": B's refresh under clear keys did not hand A's results over");
+                Require(StorageTexture::FindPending(address, surfaceA) == imageA, where + ": A's results did not stay pending");
+                Require(std::all_of(memory, memory + 2 * 65536, [](std::uint8_t value) { return value == 0x55; }), where + ": B's refresh stored A's results over B");
+            } else {
+                Require(StorageTexture::ClearHandOvers() == handOvers, where + ": the hand-over ran while off");
+            }
+            outcome.imageB = readImage(imageB, 128, 128, 8);
+            Require(filled(outcome.imageB, cleared), where + ": B does not hold its keys' clear");
+            if (order == Order::ReadFirst) {
+                Require(filled(readMemory(address, 65536), red), where + ": a read of A's memory before B wrote it did not see A's results");
+                imageA->Refresh();
+                Require(filled(readImage(imageA, 256, 256, 4), red), where + ": A read again as A lost its results");
+            }
+            if (order == Order::Rewritten) {
+                draw(imageA, {{0.0f, 0.0f, 1.0f, 1.0f}});
+                Require(filled(readMemory(address, 65536), blue), where + ": a read of A's memory did not see A's newer results");
+                imageB->Refresh();
+                Require(filled(readImage(imageB, 128, 128, 8), cleared), where + ": B refreshed again does not hold its keys' clear");
+            }
+            if (order == Order::CpuStore) {
+                std::memset(memory + 65536, 0x77, 65536);
+            }
+            draw(imageB, {{0.0f, 1.0f, 0.0f, 1.0f}});
+            Require(StorageTexture::FlushPending(address, bytes, nullptr, "clear-key hand-over test", PublishScope::Whole), where + ": nothing was pending at the end");
+            recorder.Submit();
+            device.WaitQueue();
+            recorder.Sync();
+            outcome.bytes = readMemory(address, surfaceA);
+            Require(filled(readImage(imageB, 128, 128, 8), green), where + ": B lost its results");
+        }
+        outcome.handOvers = StorageTexture::ClearHandOvers() - handOvers;
+        outcome.superseded = StorageTexture::HandedOverSuperseded() - superseded;
+        recorder.Sync();
+        return outcome;
+    };
+    for (const auto order : {Order::Superseded, Order::ReadFirst, Order::Rewritten, Order::CpuStore}) {
+        const std::string name = what + (order == Order::Superseded ? ", A never read again" : order == Order::ReadFirst ? ", A read before B wrote" : order == Order::Rewritten ? ", A written again after the hand-over" : ", a CPU store before B wrote");
+        const auto off = run(false, order);
+        const auto on = run(true, order);
+        const auto& lastA = order == Order::Rewritten ? blue : red;
+        if (order != Order::CpuStore) Require(filled(std::span(off.bytes).first(2 * 65536), green), name + ": B's results did not reach guest memory with the hand-over off");
+        Require(filled(std::span(off.bytes).subspan(2 * 65536), lastA), name + ": A's results did not reach guest memory with the hand-over off");
+        Require(on.imageB == off.imageB, name + ": B held other texels with the hand-over on than off");
+        Require(on.bytes == off.bytes, name + ": the hand-over left other guest bytes than the old order");
+        Require(off.handOvers == 0 && off.superseded == 0, name + ": the hand-over ran while off");
+        if (!watched) {
+            Require(on.handOvers == 0, name + ": results were handed over in memory the write tracker does not watch");
+            continue;
+        }
+        if (order == Order::Superseded) Require(on.superseded == 2, name + ": B's results did not drop A's two units under B (dropped " + std::to_string(on.superseded) + ")");
+        if (order == Order::ReadFirst) Require(on.superseded <= 1, name + ": a unit stored by the read was dropped again");
+    }
+    std::cout << what << ": ok\n";
+    return true;
+}
+
 bool shadowedKeyStoreTests(const Device& device, Recorder& recorder) {
     using namespace AgcDriver::GuestMemory;
     const auto& context = device.GetContext();
@@ -6855,6 +7065,12 @@ bool shadowedKeyStoreTests(const Device& device, Recorder& recorder) {
     shadow(0x40);
     Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Clear0001 && !recorder.PendingWriteOverlaps(address, keyCount), "the keys under a fresh unit shadow were not read from its published bytes after a wait");
     Require(keys[0] == 0x40 && keys[unit - 1] == 0x40 && keys[unit] == 0xff && !AnyShadowedOverlaps(address, unit), "the fresh unit's publish did not land");
+    recorder.Sync();
+    shadow(0x22);
+    MarkWritten(address, unit);
+    recorder.NotePendingFill(address + unit, unit, 0x11);
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Clear0001 && !AnyShadowedOverlaps(address, unit), "the keys under a stale unit shadow were not read from guest memory");
+    Require(recorder.PendingWriteOverlaps(address + unit, unit), "a key read under a stale unit shadow waited for a write outside the keys");
     recorder.Sync();
     shadow(0x22);
     recorder.NotePendingFill(address, unit, 0xc0);
@@ -7328,6 +7544,89 @@ void dataRefreshTests(const Device& device, Recorder& recorder) {
     recorder.Submit();
     device.WaitQueue();
     recorder.Sync();
+}
+
+void multisampleResolveInitializationTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    if ((context.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0 || !device.Graphics()) {
+        throw std::runtime_error("multisample resolve initialization requires a graphics queue and 4x color targets");
+    }
+    context.hostImportAlignment = 0; // Exercise the CPU fallback that previously re-entered the cache.
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    constexpr std::uint32_t side = 64;
+    constexpr std::size_t bytes = 5u * 65536u;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "resolve initialization: cannot allocate guest memory");
+    std::memset(block, 0x55, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    GuestAllocations::Mutation().Add(block, bytes, true, true, true);
+    struct Release {
+        const Context& context;
+        void* block;
+        ~Release() {
+            ClearMultisampleTargets(context.device);
+            ClearCachedTextures(context.device);
+            GuestAllocations::Mutation().Remove(block);
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{context, block};
+    ColorTarget target{};
+    target.address = address;
+    target.surfaceAddress = address;
+    target.extent = {side, side};
+    target.surfaceExtent = target.extent;
+    target.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target.tileMode = ColorTileMode::Standard64KB;
+    target.bytes = ColorTargetLayout(side, side, target.tileMode).Bytes();
+    target.samples = 4;
+    VkImage source = VK_NULL_HANDLE;
+    Require(MultisampleTargetView(context, target, &source) != VK_NULL_HANDLE, "resolve initialization: missing multisample view");
+    VkClearColorValue red{};
+    red.float32[0] = red.float32[3] = 1.0f;
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    RecordMemoryBarrier(context, recorder.Commands(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(recorder.Commands(), source, VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
+    RecordMemoryBarrier(context, recorder.Commands(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    auto surface = CachedStorageSurface(context, SurfaceForTarget(target));
+    Require(surface != nullptr, "resolve initialization: the cache returned no image");
+    const auto first = surface;
+    const auto readPixel = [&] {
+        recorder.Sync();
+        Buffer readback(context, 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        CommandBatch batch(context);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {1, 1, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(batch.Handle(), surface->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        readback.Invalidate();
+        std::uint32_t pixel = 0;
+        std::memcpy(&pixel, readback.Bytes().data(), sizeof(pixel));
+        return pixel;
+    };
+    Require(readPixel() == 0xff0000ffu, "resolve initialization: guest bytes replaced the real red multisample pixels");
+    std::uint32_t guest = 0;
+    AgcDriver::GuestMemory::Read(address, std::as_writable_bytes(std::span(&guest, 1)), 4);
+    Require(guest == 0xff0000ffu, "resolve initialization: resolved pixels did not reach the real guest read");
+    surface = CachedStorageSurface(context, SurfaceForTarget(target));
+    Require(surface == first && readPixel() == 0xff0000ffu, "resolve initialization: repeated lookup lost the resolved image");
+    recorder.Sync();
+    std::cout << "Multisample resolve initialization and guest visibility passed\n";
 }
 
 void multisampleGuestAccessTests(const Device& device, Recorder& recorder) {
@@ -9571,9 +9870,21 @@ int main(int argc, char** argv) {
             std::cout << "DCC keys under unit shadows tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--clear-hand-over-only") {
+            clearHandOverTests(device, recorder, false);
+            if (!clearHandOverTests(device, recorder, true)) {
+                std::cout << "skipped, the device imports no watched host memory for the clear-key hand-over\n";
+                return 77;
+            }
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-inputs-in-place-only") {
             drawInputInPlaceTests(device, recorder);
             std::cout << "In-place draw input tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--multisample-resolve-init-only") {
+            multisampleResolveInitializationTests(device, recorder);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--multisample-only") {

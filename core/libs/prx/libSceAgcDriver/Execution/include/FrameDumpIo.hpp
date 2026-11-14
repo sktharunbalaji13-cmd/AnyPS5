@@ -8,6 +8,12 @@
 
 namespace AgcDriver {
 
+// The name of a frame dump file: frame_<index>.bmp. The index is the capture's number, so the
+// files of a run are numbered in the order the captures were made.
+inline void FrameDumpFileName(char* out, std::size_t capacity, int index) {
+    std::snprintf(out, capacity, "frame_%03d.bmp", index);
+}
+
 struct FrameDumpIoFailure {
     const char* operation = nullptr;
     int error = 0;

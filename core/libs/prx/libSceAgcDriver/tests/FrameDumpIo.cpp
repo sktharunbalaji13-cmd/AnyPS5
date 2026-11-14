@@ -1,10 +1,12 @@
 #include "prx/libSceAgcDriver/Execution/include/FrameDumpIo.hpp"
+#include "prx/libSceAgcDriver/Execution/include/FrameDumpSchedule.hpp"
 #include <array>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <string>
 #include <thread>
 #include <vector>
 #ifdef _WIN32
@@ -130,6 +132,37 @@ void DisableAfterFailure() {
     Check(std::filesystem::remove(directory), "cannot remove empty fixture directory");
 }
 
+// The evidence path: the capture plan decides that a present is captured, the capture's index
+// names the file and the writer puts the frame's pixels in it.
+void PlanWritesTheFrame() {
+    const auto directory = std::filesystem::temp_directory_path() / ("anyps5-bmp-plan-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    Check(std::filesystem::create_directory(directory), "cannot create capture-plan fixture");
+    AgcDriver::CapturePlan plan;
+    plan.limit = 2;
+    plan.at = AgcDriver::ParseDumpTimes("8");
+    AgcDriver::FrameDumpOutput output;
+    const std::array<std::byte, 16> pixels{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    // The run's first frame is captured even though the capture time is still in the future.
+    Check(plan.Reserve(1.0), "the run's first frame is not captured");
+    char name[32];
+    AgcDriver::FrameDumpFileName(name, sizeof(name), plan.Index());
+    Check(std::string(name) == "frame_000.bmp", "the first capture is not frame_000.bmp");
+    const auto first = (directory / name).string();
+    Check(output.Write_nid_no_patch(first.c_str(), 2, 2, pixels), "the captured frame was not written");
+    plan.Commit();
+    // The scheduled capture is the next file.
+    Check(plan.Reserve(8.0), "the scheduled capture is not captured");
+    AgcDriver::FrameDumpFileName(name, sizeof(name), plan.Index());
+    Check(std::string(name) == "frame_001.bmp", "the scheduled capture is not frame_001.bmp");
+    const auto second = (directory / name).string();
+    Check(output.Write_nid_no_patch(second.c_str(), 2, 2, pixels), "the scheduled frame was not written");
+    plan.Commit();
+    Check(std::filesystem::file_size(first) == 54 + pixels.size(), "the captured frame has the wrong size");
+    Check(std::filesystem::file_size(second) == 54 + pixels.size(), "the scheduled frame has the wrong size");
+    Check(!plan.Reserve(9.0), "the limit is not respected");
+    std::filesystem::remove_all(directory);
+}
+
 }
 
 int main() {
@@ -141,9 +174,10 @@ int main() {
     PixelFailure();
     CloseFailure();
     DisableAfterFailure();
+    PlanWritesTheFrame();
 #ifndef _WIN32
     std::signal(SIGPIPE, previous);
 #endif
-    std::puts("frame dump I/O tests passed: bytes/header/pixels/close/disable");
+    std::puts("frame dump I/O tests passed: bytes/header/pixels/close/disable/plan");
     return 0;
 }

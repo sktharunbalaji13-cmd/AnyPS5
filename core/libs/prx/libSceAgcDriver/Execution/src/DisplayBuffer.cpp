@@ -250,6 +250,23 @@ std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer) {
         std::fprintf(stderr, "[gpu] scanout display buffer 0x%llx %ux%u format 0x%016llx at %.1f s\n", static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, static_cast<unsigned long long>(buffer.pixelFormat), std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
     }
     GuestMemory::FlushGpuWrites(buffer.address, size);
+    static const bool traceRaw = std::getenv("APS5_TRACE_SCANOUT_RAW") != nullptr;
+    if (traceRaw) {
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 8) {
+            const auto* raw = reinterpret_cast<const unsigned char*>(buffer.address);
+            std::size_t sampled = 0;
+            std::size_t nonZero = 0;
+            unsigned maxByte = 0;
+            for (std::size_t at = 0; at < size; at += 64) {
+                const auto value = raw[at];
+                ++sampled;
+                if (value != 0) ++nonZero;
+                if (value > maxByte) maxByte = value;
+            }
+            std::fprintf(stderr, "[scanout-raw] 0x%llx %zu bytes: %zu of %zu sampled non-zero, max byte %u\n", static_cast<unsigned long long>(buffer.address), size, nonZero, sampled, maxByte);
+        }
+    }
     GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), size, buffer.alignment);
     const auto* source = reinterpret_cast<const std::byte*>(buffer.address);
     return DecodeDisplayBuffer(buffer, {source, size});
@@ -268,6 +285,23 @@ std::vector<std::byte> DisplayBufferTexels(const DisplayBuffer& buffer, std::spa
 std::vector<std::byte> ReadDisplayBufferTexels(const DisplayBuffer& buffer) {
     const auto size = DisplayBufferSize(buffer);
     GuestMemory::FlushGpuWrites(buffer.address, size);
+    static const bool traceRaw = std::getenv("APS5_TRACE_SCANOUT_RAW") != nullptr;
+    if (traceRaw) {
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 8) {
+            const auto* raw = reinterpret_cast<const unsigned char*>(buffer.address);
+            std::size_t sampled = 0;
+            std::size_t nonZero = 0;
+            unsigned maxByte = 0;
+            for (std::size_t at = 0; at < size; at += 64) {
+                const auto value = raw[at];
+                ++sampled;
+                if (value != 0) ++nonZero;
+                if (value > maxByte) maxByte = value;
+            }
+            std::fprintf(stderr, "[scanout-raw] 0x%llx %zu bytes: %zu of %zu sampled non-zero, max byte %u\n", static_cast<unsigned long long>(buffer.address), size, nonZero, sampled, maxByte);
+        }
+    }
     GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), size, buffer.alignment);
     return DisplayBufferTexels(buffer, {reinterpret_cast<const std::byte*>(buffer.address), size});
 }

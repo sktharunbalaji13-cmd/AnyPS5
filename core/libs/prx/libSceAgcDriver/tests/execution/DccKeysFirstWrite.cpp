@@ -248,12 +248,12 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* block) {
     StorageTexture::FlushPending(surface, SurfaceBytes, nullptr, "test");
     device.WaitIdle();
     RequireKeys(keys, 0xff, "the keys after the write-back");
-    const auto requireTexels = [&](const char* what) {
+    const auto requireTexels = [&](const char* what, std::size_t expected = Threads * 4u) {
         const auto written = Count(texels, SurfaceBytes, 0xff);
         const auto cleared = Count(texels, SurfaceBytes, 0x00);
         char text[320];
-        std::snprintf(text, sizeof(text), "%s: the write-back stored %zu written and %zu cleared bytes of %zu, expected %u written", what, written, cleared, SurfaceBytes, Threads * 4u);
-        Require(written == Threads * 4u && cleared == SurfaceBytes - written, text);
+        std::snprintf(text, sizeof(text), "%s: the write-back stored %zu written and %zu cleared bytes of %zu, expected %zu written", what, written, cleared, SurfaceBytes, expected);
+        Require(written == expected && cleared == SurfaceBytes - written, text);
     };
     requireTexels("the first write");
     const auto fillKeys = [&](std::uint8_t key, DccKeys code) {
@@ -290,7 +290,11 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* block) {
     StorageTexture::FlushPending(surface, SurfaceBytes, nullptr, "test");
     device.WaitIdle();
     RequireKeys(keys, 0xff, "the keys of a write after a kernel key clear, after its write-back");
-    requireTexels("a write after a kernel key clear over an earlier write");
+    // The kernel's key clear overwrote the DCC metadata alone, and the driver's model of the texels
+    // still holds the earlier write: a clear-code flip keeps the pending results unless the guest
+    // really cleared the surface (its key fill, or its own writes over the texels). Both writes are
+    // stored.
+    requireTexels("a write after a kernel key clear over an earlier write", Threads * 8u);
     auto* recorder = AgcDriver::Graphics::Recorder::Active();
     Require(recorder != nullptr, "DCC keys first write: no active recorder");
     const auto readPending = [&](DccKeys expected, bool wait, const char* what) {

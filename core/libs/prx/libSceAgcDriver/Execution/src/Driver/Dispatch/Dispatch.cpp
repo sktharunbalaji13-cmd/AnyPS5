@@ -5,11 +5,13 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DrawWriteRanges.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DwordPatternFill.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -507,6 +509,12 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     auto* const attachTo = stampValidate() ? nullptr : keepVariant != nullptr ? keepVariant.get() : attachVariant.get();
     bool writersNoted = false;
     const bool noteWrites = writeEvidenceEnabled() || traceCapSync();
+    // A title kernel that fast-clears its render target's DCC keys writes them itself. The driver
+    // cannot know the value such a dispatch leaves, so a key read over the range would wait for the
+    // GPU under the GPU mutex. The kernel's own key code is known from its SGPRs, so it is noted
+    // in the key-store memo as soon as the dispatch is recorded, as a buffer fill of keys already is.
+    const auto keysFill = indirectArguments == 0 && !partialLastGroup ? MatchSgprPatternFill(packet, std::span(snapshot.code).subspan(codeOffset), userData, compute) : std::nullopt;
+    const auto filledKeys = keysFill ? KeysFillMemo(keysFill->pattern, false, true) : std::nullopt;
 
     std::optional<Graphics::DepthPlaneClear> depthPlaneClear;
     if (indirectArguments == 0 && !partialLastGroup) {
@@ -558,6 +566,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             writersNoted = true;
         }
         phaseTiming.Phase(PhaseNoteWriters);
+        auto* const keysRecorder = filledKeys ? Graphics::Recorder::Active() : nullptr;
+        const auto keysNoteBefore = keysRecorder != nullptr ? keysRecorder->LastWriteNote(keysFill->base, keysFill->bytes) : 0;
         try {
             if (recipeHit != nullptr) {
                 VulkanDevice::IndirectOutcome outcome{0, 0};
@@ -577,6 +587,12 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             }
         } catch (const std::exception& error) {
             if (rethrow(error)) return;
+        }
+        // The memo answers only while the dispatch's own write note is the newest over the range,
+        // so any later writer still makes the read wait for that work.
+        if (keysRecorder != nullptr && keysRecorder == Graphics::Recorder::Active()) {
+            const auto note = keysRecorder->LastWriteNote(keysFill->base, keysFill->bytes);
+            if (note != 0 && note != keysNoteBefore) Graphics::NoteKeysFillOnGpu(keysFill->base, keysFill->bytes, *filledKeys);
         }
         if (builtRecipe != nullptr) {
             if (dataHit) {

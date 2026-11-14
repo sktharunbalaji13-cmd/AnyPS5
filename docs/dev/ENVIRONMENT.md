@@ -205,6 +205,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_BLOCK_TRACKING` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | tracks array layers, or the whole surface, instead of 64 KiB blocks |
 | `APS5_NO_BUFFER_CLASSES` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/BufferPool.cpp` |  | matches exact sizes in the buffer pool instead of rounding up to size classes |
 | `APS5_NO_CACHED_PRECOLLECT` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | leaves the write-watch walks of a cached object's Revalidate under the GPU mutex |
+| `APS5_NO_CLEAR_HAND_OVER` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | writes other images' pending results back at a clear-key storage refresh instead of handing them over to the refreshed image |
 | `APS5_NO_CLEARED_VIEW` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | keeps fast-cleared surfaces as CPU snapshots instead of viewing the cleared storage image |
 | `APS5_NO_COLLECT_MEMO` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | disables the per-thread memo of write-watch collects |
 | `APS5_NO_CONTEXT_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp` |  | rebuilds the Graphics::Context on every call instead of returning the cached one |

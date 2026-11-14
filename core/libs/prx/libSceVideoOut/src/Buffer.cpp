@@ -91,6 +91,7 @@ int APS5_VABI sceVideoOutGetBufferLabelAddress(int handle, uintptr_t* address) t
     cfg->CheckAlive();
     if (cfg->Closed()) return VIDEO_OUT_ERROR_INVALID_HANDLE;
     const auto labels = reinterpret_cast<uintptr_t>(cfg->bufferLabels.data());
+    std::fprintf(stderr, "[videoout] buffer label addresses 0x%llx..0x%llx (%d labels)\n", static_cast<unsigned long long>(labels), static_cast<unsigned long long>(labels + VIDEO_OUT_BUFFER_NUM_MAX * sizeof(std::uint64_t)), VIDEO_OUT_BUFFER_NUM_MAX);
     std::memcpy(address, &labels, sizeof(labels));
     return VIDEO_OUT_BUFFER_NUM_MAX;
 } catch (const ProcessShutdown&) {
@@ -184,6 +185,7 @@ int APS5_VABI sceVideoOutRegisterBuffers(int handle, int bufferIndexStart, void*
     if (attribute->tiling_mode != 1) {
         throw std::runtime_error(std::string(__func__) + ": PS4 tiled display buffers are not implemented");
     }
+    for (int index = 0; index < bufferNum; ++index) std::fprintf(stderr, "[videoout-register] index=%d address=%p format=%d\n", bufferIndexStart + index, addresses[index], static_cast<int>(attribute->pixel_format));
     BufferAttributeGroup group{};
     group.attribute.pixel_format = Ps5PixelFormat(attribute->pixel_format);
     group.attribute.tiling_mode = attribute->tiling_mode;
@@ -293,6 +295,11 @@ int APS5_VABI sceVideoOutSubmitFlip(int handle, int index, int flipMode, int64_t
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_INDEX");
     }
     lock.unlock();
+    static const bool traceFlip = std::getenv("APS5_TRACE_VIDEOOUT") != nullptr;
+    if (traceFlip) {
+        static std::atomic<std::uint64_t> flipCount{0};
+        std::fprintf(stderr, "[videoout-flip] %llu index=%d mode=%d arg=%lld\n", static_cast<unsigned long long>(++flipCount), index, flipMode, static_cast<long long>(flipArg));
+    }
     return VideoOutDriver::Get().SubmitFlip(handle, index, flipMode, flipArg);
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();

@@ -359,11 +359,36 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             std::this_thread::yield();
         }
         CheckFailure();
+        // APS5_TRACE_MEMORY: the device's heap budget and usage while the queue waits, so that a
+        // long wait or a later device loss can be read against the memory that was left.
+        static const bool traceMemory = std::getenv("APS5_TRACE_MEMORY") != nullptr;
+        if (traceMemory && (polls & 31u) == 0) {
+            static thread_local auto lastMemory = std::chrono::steady_clock::time_point{};
+            const auto memoryNow = std::chrono::steady_clock::now();
+            if (memoryNow - lastMemory > std::chrono::seconds(2)) {
+                lastMemory = memoryNow;
+                if (const auto current = device.Load(); current != nullptr) current->ReportMemoryBudget("queue wait");
+            }
+        }
         if (pollService(!spinning)) return;
         // The wait reads the awaited word with a raw volatile load, so a GPU write to it that
         // the recorder still holds is invisible to the wait. The flush publishes the held
         // results over the awaited range, so the wait sees the value the guest's release wrote.
         if (storeHeldResults && !spinning && (polls & 31u) == 0) GuestMemory::FlushGpuWrites(awaited, awaitedBytes);
+        {
+            struct Watched {
+                std::uint64_t address = 0;
+                std::uint32_t value = 0;
+            };
+            static thread_local Watched watched;
+            const auto observed = *reinterpret_cast<const volatile std::uint32_t*>(awaited);
+            if (watched.address == awaited && observed != watched.value) {
+                std::fprintf(stderr, "[wait-watch] 0x%llx changed %u -> %u after %lld ms\n", static_cast<unsigned long long>(awaited), watched.value, observed,
+                             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count()));
+            }
+            watched.address = awaited;
+            watched.value = observed;
+        }
         noteAwaitingTitle(queue, awaited);
         if (requireMemory && (polls & 15u) == 0) {
             std::unique_lock settleLock(GuestMemory::GpuMutex(), std::try_to_lock);
@@ -393,9 +418,23 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
                          queue, wide ? "_64" : "", static_cast<unsigned long long>(awaited),
                          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count()),
                          packet[1] & 7u, static_cast<unsigned long long>(reference), static_cast<unsigned long long>(mask), static_cast<unsigned long long>(current));
+            {
+                const auto generation = GuestMemory::CollectWrites(awaited, awaitedBytes);
+                std::fprintf(stderr, "[gpu]   write watch at 0x%llx: generation %llu (non-zero means something wrote the page)\n", static_cast<unsigned long long>(awaited), static_cast<unsigned long long>(generation));
+            }
             for (const auto& record : writeHistory()) {
                 if (record.length != 0 && record.target <= awaited && awaited < record.target + std::max<std::uint64_t>(record.length, 4))
                     std::fprintf(stderr, "[gpu]   earlier write by queue 0x%x opcode 0x%x at 0x%llx+0x%llx\n", record.queue, record.opcode, static_cast<unsigned long long>(record.target), static_cast<unsigned long long>(record.length));
+            }
+            if (const auto reportDevice = device.Load(); reportDevice != nullptr) {
+                Graphics::Recorder::LabelRefusal refusal{};
+                const auto hit = reportDevice->PendingLabel(awaited, awaitedBytes, received, &refusal);
+                const auto since = Graphics::Recorder::PendingLabelSince();
+                const auto age = since.has_value() ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - *since).count() : -1.0;
+                std::fprintf(stderr, "[gpu]   recorder: table %s (refusal %u), open batch writes it %d, snapshot write overlaps %d, pending completion labels %llu, write-back completions %llu, pending label age %.1f ms, packets in flight %llu, packets done %llu\n",
+                             hit.has_value() ? "hit" : "miss", static_cast<unsigned>(refusal), reportDevice->OpenWriteOverlaps(awaited, awaitedBytes) ? 1 : 0, Graphics::Recorder::SnapshotWriteOverlaps(awaited, awaitedBytes) ? 1 : 0,
+                             static_cast<unsigned long long>(Graphics::Recorder::PendingCompletionLabels()), static_cast<unsigned long long>(Graphics::Recorder::PendingWriteBackCompletions()), age,
+                             static_cast<unsigned long long>(packetsInFlight.load()), static_cast<unsigned long long>(packetsDone.load()));
             }
             // The census of the guest's queues: a queue the guest used to publish the value
             // this wait wants would show its submissions here.
@@ -407,12 +446,13 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
             // The write history holds only the packets the driver's own path saw. The guest's
             // CPU-side store to this range is not a packet, so the range's own content is
             // dumped here: the dwords around the awaited one, with the slot's neighbours.
-            if (std::getenv("APS5_TRACE_WAIT_WORDS") == nullptr) break;
-            const auto base = awaited & ~0xfffull;
-            for (std::uint64_t offset = 0; offset < 0x400; offset += 4) {
-                const auto* word = reinterpret_cast<const std::uint32_t*>(base + offset);
-                if (!GuestMemory::Accessible(reinterpret_cast<const void*>(word), 4)) continue;
-                std::fprintf(stderr, "[gpu]   the guest word at 0x%llx is 0x%x\n", static_cast<unsigned long long>(base + offset), *word);
+            if (std::getenv("APS5_TRACE_WAIT_WORDS") != nullptr) {
+                const auto base = awaited & ~0xfffull;
+                for (std::uint64_t offset = 0; offset < 0x400; offset += 4) {
+                    const auto* word = reinterpret_cast<const std::uint32_t*>(base + offset);
+                    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(word), 4)) continue;
+                    std::fprintf(stderr, "[gpu]   the guest word at 0x%llx is 0x%x\n", static_cast<unsigned long long>(base + offset), *word);
+                }
             }
         }
         stall.Check(((packet[0] >> 8u) & 0xffu) == 0x93u ? "WAIT_REG_MEM_64 at" : "WAIT_REG_MEM at", awaited);

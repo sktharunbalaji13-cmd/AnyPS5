@@ -956,12 +956,17 @@ class RecordedStoreSyncScope {
 public:
     RecordedStoreSyncScope(const Recorder& recorder, std::uint64_t address, std::size_t bytes, const StorageTexture::AccessClassification& classification, bool stored, const HookSyncKey& key) : enabled(HookSyncProfiled()), address(address), bytes(bytes), classification(classification), stored(stored), key(key) {
         if (!enabled) return;
+        static std::atomic<int> traced{0};
+        const bool trace = traced.fetch_add(1, std::memory_order_relaxed) < 8;
+        const auto entered = std::chrono::steady_clock::now();
         batchesInFlight = recorder.InFlightBatches();
+        if (trace) std::fprintf(stderr, "[scope-trace] 0x%llx+0x%zx in flight took %.0f ms (%llu batches)\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entered).count(), static_cast<unsigned long long>(batchesInFlight));
         if (key.site != GuestMemory::ReadSite::Store && bytes <= CompareLimit && GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes)) {
             before.resize(bytes);
             std::memcpy(before.data(), reinterpret_cast<const void*>(address), bytes);
         }
         start = std::chrono::steady_clock::now();
+        if (trace) std::fprintf(stderr, "[scope-trace] 0x%llx+0x%zx constructor done after %.0f ms\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entered).count());
     }
     ~RecordedStoreSyncScope() {
         if (!enabled) return;
@@ -1011,6 +1016,10 @@ private:
 // dereferenced under the GpuMutex (it is destroyed with its device under that lock).
 void FlushForAccess(std::uint64_t address, std::size_t bytes) {
     hookCalls.fetch_add(1, std::memory_order_relaxed);
+    const auto slowStart = std::chrono::steady_clock::now();
+    static std::atomic<int> entryCalls{0};
+    const bool reportEntry = entryCalls.fetch_add(1, std::memory_order_relaxed) < 8;
+    bool reportStore = false;
     // A label this worker queued but has not recorded writes the range: in queue order the label
     // precedes this access, so the group is recorded first (it then notes the range as a pending
     // write of the open batch, and the check below syncs on it like any recorded store). Not from
@@ -1056,12 +1065,50 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
     std::size_t images = 0, evicted = 0;
     const bool kept = !HookFlushCpuBlocks() && StorageTexture::AccessKeptByCpu(address, bytes, &images, &evicted);
     if (kept || (images == 0 && !HookFlushCpuBlocks())) {
+        // Another thread's FlushPending may be storing an image over this range right now: the
+        // images leave the pending list for the store, so the flush below finds nothing pending
+        // while that store runs. This read must wait for it, or it sees guest memory before the
+        // store. The wait is taken here, where the flush itself is skipped.
+        stored = StorageTexture::WaitForFlushing(address, bytes);
         published = StorageTexture::PublishShadowsOnly(address, bytes, scope);
         if (kept && HookSyncProfiled()) CountRecordedStoreSkip(RecordedStoreKey(), evicted);
     } else {
         stored = StorageTexture::FlushPending(address, bytes, nullptr, "memory access", scope, &published);
     }
-    if (stored || published) {
+    static const bool skipHookSync = std::getenv("APS5_NO_HOOK_SYNC") != nullptr;
+    static const bool skipNestedSync = std::getenv("APS5_NO_NESTED_HOOK_SYNC") != nullptr;
+    const bool nestedHook = GuestMemory::GpuMutex().DepthOnThisThread() != 0;
+    if (skipNestedSync && nestedHook) return;
+    if ((stored || published) && !skipHookSync) {
+        static std::atomic<int> recordedCalls{0};
+        const bool reportThis = recordedCalls.fetch_add(1, std::memory_order_relaxed) < 8;
+        reportStore = reportThis;
+        const auto callStart = std::chrono::steady_clock::now();
+        struct CallReport {
+            bool enabled;
+            std::chrono::steady_clock::time_point start;
+            std::uint64_t address;
+            std::size_t bytes;
+            bool stored;
+            bool published;
+            ~CallReport() {
+                if (!enabled) return;
+                std::fprintf(stderr, "[flush-call] 0x%llx+0x%zx stored=%d published=%d waited %.0f ms\n",
+                             static_cast<unsigned long long>(address), bytes, stored ? 1 : 0, published ? 1 : 0,
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            }
+        } callReport{reportThis, callStart, address, bytes, stored, published};
+        double lockMs = -1.0, syncMs = -1.0;
+        struct PhaseReport {
+            bool enabled;
+            std::chrono::steady_clock::time_point start;
+            const double* lock;
+            const double* sync;
+            ~PhaseReport() {
+                if (!enabled) return;
+                std::fprintf(stderr, "[flush-phase] lock %.0f ms, sync %.0f ms, total %.0f ms\n", *lock, *sync, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            }
+        } phaseReport{reportThis, callStart, &lockMs, &syncMs};
         // Stores into imported memory were only recorded; the CPU is about to read them. The wait
         // targets the batch holding them (the open one: SyncThrough submits it) and runs with the
         // mutex released when this acquisition is the outermost; a nested hook waits locked through
@@ -1070,11 +1117,21 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
         // only the full Sync() gives there.
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Hook);
         std::lock_guard gpu(GuestMemory::GpuMutex());
+        lockMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count();
         if (auto* recorder = Recorder::Active(); recorder != nullptr) {
+            if (reportThis) std::fprintf(stderr, "[flush-step] 0x%llx+0x%zx recorder active at %.0f ms full=%d depth=%d\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count(), HookFullSync() ? 1 : 0, static_cast<int>(completionDepth));
             const RecordedStoreSyncScope attribution(*recorder, address, bytes, classification, stored, HookSyncProfiled() ? RecordedStoreKey() : HookSyncKey{});
+            if (reportThis) std::fprintf(stderr, "[flush-step] 0x%llx+0x%zx scope built at %.0f ms\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count());
             Recorder::CountSync(2);
-            if (HookFullSync() || completionDepth != 0) recorder->Sync();
-            else recorder->SyncThrough(address, bytes, true);
+            try {
+                if (HookFullSync() || completionDepth != 0) recorder->Sync();
+                else recorder->SyncThrough(address, bytes, true);
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[flush-throw] 0x%llx+0x%zx after %.0f ms: %s\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count(), error.what());
+                throw;
+            }
+            syncMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count();
+            if (reportThis) std::fprintf(stderr, "[flush-step] 0x%llx+0x%zx sync returned at %.0f ms\n", static_cast<unsigned long long>(address), bytes, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callStart).count());
         }
     }
 }
@@ -1532,6 +1589,12 @@ void Recorder::ensureOpen() {
         dropStaleHoldKept();
         batch->kept.insert(batch->kept.end(), holdKept.begin(), holdKept.end());
         open = std::move(batch);
+        static const bool batchMarkerEnabled = std::getenv("APS5_BATCH_MARKER") != nullptr;
+        if (batchMarkerEnabled) {
+            if (batchMarker == nullptr) batchMarker = std::make_shared<Buffer>(context, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            open->markerStamp = ++batchMarkerStamp;
+            context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(open->commands, batchMarker->Handle(), 0, 4, open->markerStamp);
+        }
         if (PerformanceTrace::Recording()) {
             static std::atomic<std::uint64_t> traceIds{0};
             open->traceId = traceIds.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -3012,6 +3075,57 @@ bool Recorder::ReadTracking() {
     return ReadTrackingEnabled();
 }
 
+struct FinishedBatchHistory {
+    struct Entry {
+        std::uint64_t serial = 0;
+        std::uint32_t queue = 0xffffffffu;
+        std::uint64_t programs[4]{};
+        std::uint32_t programCount = 0;
+        std::uint32_t imageStores = 0;
+    };
+    std::mutex mutex;
+    std::array<Entry, 16> entries{};
+    std::size_t cursor = 0;
+};
+
+FinishedBatchHistory& FinishedHistory() {
+    static FinishedBatchHistory history;
+    return history;
+}
+
+void RecordFinishedBatch(std::uint64_t serial, std::uint32_t queue, const std::vector<std::uint64_t>& programs, std::uint32_t imageStores) {
+    auto& history = FinishedHistory();
+    std::lock_guard lock(history.mutex);
+    auto& entry = history.entries[history.cursor++ % history.entries.size()];
+    entry.serial = serial;
+    entry.queue = queue;
+    entry.programCount = static_cast<std::uint32_t>(std::min<std::size_t>(programs.size(), 4));
+    entry.imageStores = imageStores;
+    for (std::uint32_t index = 0; index < entry.programCount; ++index) entry.programs[index] = programs[index];
+}
+
+void ReportFinishedBatches() {
+    auto& history = FinishedHistory();
+    std::lock_guard lock(history.mutex);
+    std::fprintf(stderr, "[batch-log] the last %zu finished batches, oldest first:", history.entries.size());
+    for (std::size_t step = 0; step < history.entries.size(); ++step) {
+        const auto& entry = history.entries[(history.cursor + step) % history.entries.size()];
+        if (entry.serial == 0) continue;
+        std::fprintf(stderr, " %llu/0x%x[%zu|s%u]:", static_cast<unsigned long long>(entry.serial), entry.queue, static_cast<std::size_t>(entry.programCount), entry.imageStores);
+        for (std::uint32_t index = 0; index < entry.programCount; ++index) std::fprintf(stderr, "0x%llx,", static_cast<unsigned long long>(entry.programs[index]));
+    }
+    std::fprintf(stderr, "\n");
+}
+
+void Recorder::NoteBatchProgram(std::uint64_t program) {
+    if (open != nullptr) open->programs.push_back(program);
+}
+
+void Recorder::NoteImageStore(std::size_t bytes) {
+    static_cast<void>(bytes);
+    if (open != nullptr) ++open->imageStores;
+}
+
 void Recorder::NotePendingRead(std::uint64_t address, std::size_t bytes, ReadKind kind) {
     CaptureTrace::Log("buffer-read batch=%llu address=%llx bytes=%zu kind=%d", static_cast<unsigned long long>(submissions + 1), static_cast<unsigned long long>(address), bytes, static_cast<int>(kind));
     if (bytes == 0 || !ReadTrackingEnabled()) return;
@@ -3436,6 +3550,9 @@ void Recorder::Submit() {
             if (batch != nullptr && !batch->submitted) recorder.discard(std::move(batch));
         }
     } discardUnsubmitted{*this, batch};
+    if (batch->markerStamp != 0 && batchMarker != nullptr) {
+        context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(batch->commands, batchMarker->Handle(), 4, 4, batch->markerStamp ^ 0xFFFFFFFFu);
+    }
     Check(function(endCommandBuffer, "vkEndCommandBuffer")(batch->commands), "vkEndCommandBuffer recorder");
     VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submission.commandBufferCount = 1;
@@ -3909,7 +4026,71 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
             }
         } report{profile, source, waitStart, *this, signaledAtStart};
         const auto waitFences = function(waitForFences, "vkWaitForFences");
-        auto result = waitFences(context.device, 1, &batch->fence, VK_TRUE, 5'000'000'000ull);
+        if (std::getenv("APS5_TRACE_FENCE") != nullptr && timeline != VK_NULL_HANDLE && batch->serial != 0) {
+            const auto counter = context.Function<PFN_vkGetSemaphoreCounterValueKHR>("vkGetSemaphoreCounterValueKHR");
+            std::uint64_t value = 0;
+            const auto valueResult = counter != nullptr ? counter(context.device, timeline, &value) : VK_ERROR_EXTENSION_NOT_PRESENT;
+            const auto status = getFenceStatus(context.device, batch->fence);
+            if (valueResult != VK_SUCCESS || status != VK_NOT_READY || value + 4 < batch->serial) {
+                std::fprintf(stderr, "[fence-pre] serial %llu: timeline %llu (result %d), fence %d, %zu programs\n",
+                             static_cast<unsigned long long>(batch->serial), static_cast<unsigned long long>(value),
+                             static_cast<int>(valueResult), static_cast<int>(status), batch->programs.size());
+            }
+        }
+        const auto fenceStart = std::chrono::steady_clock::now();
+        auto result = waitFences(context.device, 1, &batch->fence, VK_TRUE, 2'000'000'000ull);
+        if (result == VK_TIMEOUT) {
+            std::uint64_t value = 0;
+            VkResult valueResult = VK_ERROR_EXTENSION_NOT_PRESENT;
+            if (timeline != VK_NULL_HANDLE) {
+                const auto counter = context.Function<PFN_vkGetSemaphoreCounterValueKHR>("vkGetSemaphoreCounterValueKHR");
+                if (counter != nullptr) valueResult = counter(context.device, timeline, &value);
+            }
+            std::fprintf(stderr, "[batch-stall] serial %llu has not signalled after 2 s: timeline %llu (result %d), newest submission %llu, %zu programs\n",
+                         static_cast<unsigned long long>(batch->serial), static_cast<unsigned long long>(value),
+                         static_cast<int>(valueResult), static_cast<unsigned long long>(submissions), batch->programs.size());
+            result = waitFences(context.device, 1, &batch->fence, VK_TRUE, 5'000'000'000ull);
+        }
+        if (result == VK_SUCCESS) {
+            const auto waitedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fenceStart).count();
+            if (waitedMs > 1000.0) {
+                std::fprintf(stderr, "[batch-slow] serial %llu queue 0x%x waited %.0f ms, %zu writes, %zu programs:", static_cast<unsigned long long>(batch->serial), batch->queue, waitedMs, batch->writes.size(), batch->programs.size());
+                for (std::size_t index = 0; index < batch->programs.size() && index < 12; ++index) std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(batch->programs[index]));
+                std::fprintf(stderr, "\n");
+            }
+        }
+        if (result != VK_SUCCESS) {
+            const auto waitedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fenceStart).count();
+            const auto submittedMs = batch->submittedAt.time_since_epoch().count() != 0 ? std::chrono::duration<double, std::milli>(fenceStart - batch->submittedAt).count() : -1.0;
+            std::fprintf(stderr, "[batch-fail] serial %llu queue 0x%x result %d: the fence was waited %.0f ms (submitted %.0f ms before), %zu writes, %zu reads, %zu completions, %zu kept objects\n",
+                         static_cast<unsigned long long>(batch->serial), batch->queue, static_cast<int>(result), waitedMs, submittedMs,
+                         batch->writes.size(), batch->reads.size(), batch->completions.size(), batch->kept.size());
+            std::fprintf(stderr, "[batch-fail] the batch records %zu guest program(s):", batch->programs.size());
+            for (std::size_t index = 0; index < batch->programs.size() && index < 12; ++index) std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(batch->programs[index]));
+            std::fprintf(stderr, "\n");
+            std::fprintf(stderr, "[batch-fail] the batch stores %u image(s):", batch->imageStores);
+            for (std::uint32_t index = 0; index < batch->storeAddressCount; ++index) std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(batch->storeAddresses[index]));
+            std::fprintf(stderr, "\n");
+            ReportFinishedBatches();
+            if (batchMarker != nullptr && batch->markerStamp != 0) {
+                const auto markerBytes = batchMarker->Bytes();
+                std::uint32_t startWord = 0, endWord = 0;
+                if (markerBytes.size() >= 8) {
+                    std::memcpy(&startWord, markerBytes.data(), 4);
+                    std::memcpy(&endWord, markerBytes.data() + 4, 4);
+                }
+                std::fprintf(stderr, "[batch-marker] stamp %u: start word %u, end word %u (end expected %u)\n",
+                             batch->markerStamp, startWord, endWord, batch->markerStamp ^ 0xFFFFFFFFu);
+            }
+            if (timeline != VK_NULL_HANDLE) {
+                const auto counter = context.Function<PFN_vkGetSemaphoreCounterValueKHR>("vkGetSemaphoreCounterValueKHR");
+                std::uint64_t value = 0;
+                const auto valueResult = counter != nullptr ? counter(context.device, timeline, &value) : VK_ERROR_EXTENSION_NOT_PRESENT;
+                std::fprintf(stderr, "[batch-timeline] after the failure: serial %llu, timeline %llu (result %d), newest submission %llu\n",
+                             static_cast<unsigned long long>(batch->serial), static_cast<unsigned long long>(value),
+                             static_cast<int>(valueResult), static_cast<unsigned long long>(submissions));
+            }
+        }
         for (int waited = 5; result == VK_TIMEOUT; waited += 5) {
             // A batch still running after 5 s is reported (every 5 s) so a GPU-side hang is visible.
             std::fprintf(stderr, "[gpu] recorded batch still running on the GPU after %d s\n", waited);
@@ -3924,6 +4105,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
             Check(result, "vkWaitForFences recorder");
         }
     }
+    RecordFinishedBatch(batch->serial, batch->queue, batch->programs, batch->imageStores);
     readGpuTiming(*batch);
     readSamples(*batch);
     if (batch->serial != 0) {
@@ -4017,6 +4199,12 @@ void Recorder::removeLabels(Batch& batch) {
 }
 
 void Recorder::release(Batch& batch) noexcept {
+    static auto retained = []() -> std::vector<std::shared_ptr<void>>* {
+        if (std::getenv("APS5_RETAIN_BATCH_OBJECTS") == nullptr) return nullptr;
+        static std::vector<std::shared_ptr<void>> list;
+        return &list;
+    }();
+    if (retained != nullptr && !batch.kept.empty()) retained->insert(retained->end(), batch.kept.begin(), batch.kept.end());
     if (batch.queries != VK_NULL_HANDLE) {
         if (!GpuTimingEnabled() && sparePools.size() < 64) {
             try {

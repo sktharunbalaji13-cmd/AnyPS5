@@ -154,6 +154,8 @@ public:
     // false and the CPU copy falls back to Idle()).
     enum class ReadKind : std::uint8_t { DispatchElement = 0, GpuCopy, AddressBased, Indirect, StorageUpload, CopySource, DrawInput, Count };
     static bool ReadTracking();
+    void NoteBatchProgram(std::uint64_t program);
+    void NoteImageStore(std::uint64_t address);
     void NotePendingRead(std::uint64_t address, std::size_t bytes, ReadKind kind);
     void NotePendingReads(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, ReadKind kind);
     using ReadList = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
@@ -552,6 +554,11 @@ private:
         std::unordered_set<const void*> keptOwners;
         std::vector<std::function<void()>> completions;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        std::vector<std::uint64_t> programs;
+        std::uint32_t markerStamp = 0;
+        std::uint32_t imageStores = 0;
+        std::array<std::uint64_t, 8> storeAddresses{};
+        std::uint32_t storeAddressCount = 0;
         std::vector<std::uint64_t> writeNotes;
         std::vector<std::int16_t> writeValues;
         std::vector<std::int64_t> writeWords;
@@ -825,6 +832,8 @@ private:
     // table is empty (most of the time between label groups).
     std::atomic<std::size_t> recordedLabels{0};
     std::unique_ptr<Batch> open;
+    std::shared_ptr<Buffer> batchMarker;
+    std::uint32_t batchMarkerStamp = 0;
     std::vector<std::shared_ptr<void>> holdKept;
     std::uint64_t holdKeptSerial = 0;
     std::deque<std::unique_ptr<Batch>> inFlight;

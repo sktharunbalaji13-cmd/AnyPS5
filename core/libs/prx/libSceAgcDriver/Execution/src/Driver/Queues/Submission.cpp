@@ -189,7 +189,12 @@ void Driver::waitForFlipRoom(const Submission& submission) {
             require(found != outputs.end(), "flip references an unregistered video output");
             output = found->second;
         }
+        const auto roomStart = std::chrono::steady_clock::now();
         output->WaitForFlipRoom();
+        const auto roomMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - roomStart).count();
+        if (roomMs >= 1000 && std::getenv("APS5_TRACE_FLIPS") != nullptr) {
+            std::fprintf(stderr, "[flip-room] queue 0x%x waited %lld ms for flip room (output %u)\n", submission.queue, static_cast<long long>(roomMs), submission.commands[cursor + 1]);
+        }
     }
 }
 
@@ -255,6 +260,7 @@ void Driver::reserveOutputs(Submission& submission) {
             const auto output = outputs.find(words[1]);
             require(output != outputs.end(), "flip references an unregistered video output");
             const FlipInfo info{words[1], std::bit_cast<std::int32_t>(words[2]), words[3], std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(words[4]) | (static_cast<std::uint64_t>(words[5]) << 32u))};
+            if (std::getenv("APS5_TRACE_FLIPS") != nullptr) std::fprintf(stderr, "[flip-packet] handle=%u index=%d mode=%u arg=0x%llx\n", info.handle, info.index, info.mode, static_cast<unsigned long long>(static_cast<std::uint64_t>(info.argument)));
             auto request = output->second->Reserve(info);
             require(request != nullptr, "video output returned a null flip reservation");
             submission.flips.emplace(cursor, std::move(request));
@@ -323,6 +329,11 @@ void Driver::executeRewindTail(const Submission& stalled) {
 }
 
 void Driver::SubmitFlip(const FlipInfo& info) {
+    static const bool traceFlip = std::getenv("APS5_TRACE_FLIPS") != nullptr;
+    if (traceFlip) {
+        static std::atomic<std::uint64_t> flips{0};
+        std::fprintf(stderr, "[flip-submit] %llu handle=%d index=%d mode=%d arg=%lld\n", static_cast<unsigned long long>(++flips), info.handle, info.index, info.mode, static_cast<long long>(info.argument));
+    }
     const auto argument = static_cast<std::uint64_t>(info.argument);
     std::array<std::uint32_t, FlipPacketWords> words{FlipPacketHeader, info.handle, static_cast<std::uint32_t>(info.index), info.mode, static_cast<std::uint32_t>(argument), static_cast<std::uint32_t>(argument >> 32u)};
     const Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};

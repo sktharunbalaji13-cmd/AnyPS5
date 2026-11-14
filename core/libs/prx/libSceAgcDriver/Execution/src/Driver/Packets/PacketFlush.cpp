@@ -13,6 +13,10 @@ void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool
     static const bool ownLock = std::getenv("APS5_LABEL_OWN_LOCK") != nullptr;
     static std::atomic<std::uint64_t> packetFlushes{0}, deadlineFlushes{0}, capFlushes{0}, boundaryReaps{0}, overdueLocks{0};
     auto& deferred = deferredLabels();
+    static const bool traceFlush = std::getenv("APS5_TRACE_PACKETS") != nullptr;
+    const auto mark = [&](const char* stage) {
+        if (traceFlush) std::fprintf(stderr, "[flush-trace] queue=0x%x header=0x%x stage=%s\n", queue, header, stage);
+    };
     const bool queued = !deferred.labels.empty();
     const bool queuedTable = queued && QueuedLabelTable();
     if (queuedTable) noteQueuedLabels(queue);
@@ -54,7 +58,9 @@ void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool
     if (DrawPipeline::Active() && (submit || record || capped || recordAtLock)) {
         static const bool committerSubmits = std::getenv("APS5_PIPELINE_DRAIN_LABELS") == nullptr;
         if (committerSubmits && !record && !recordAtLock && DrawPipeline::Queue0().Busy()) return;
+        mark("drain-before");
         DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Flush);
+        mark("drain-after");
     }
     std::unique_lock gpuLock(GuestMemory::GpuMutex(), std::defer_lock);
 
@@ -71,7 +77,9 @@ void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool
         outright = true;
     }
     if (outright) {
+        mark("lock-wait");
         gpuLock.lock();
+        mark("lock-held");
     } else if (!gpuLock.try_lock()) {
         ++triesFailed[record ? TryLabel : submit || capped ? TryFlush : TryReap];
         if (selfLocking && record) ++packetLockDeferred;
@@ -88,7 +96,9 @@ void Driver::flushBetweenPackets(std::uint32_t queue, std::uint32_t header, bool
     if (submit || capped) {
 
         if (!Graphics::Recorder::PendingLabelSince().has_value() && (batchCap() == 0 || Graphics::Recorder::RecordedWorkSinceSubmit() < batchCap())) return;
+        mark("submit-before");
         localDevice->SubmitRecorded(queue == 0);
+        mark("submit-after");
         if (capped) ++capFlushes;
         else if (!labelPacket && packetFlush) ++packetFlushes;
         else ++deadlineFlushes;

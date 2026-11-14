@@ -162,6 +162,10 @@ public:
         }
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
+        if (const char* flipTrace = std::getenv("APS5_TRACE_FLIPS"); flipTrace != nullptr) {
+            static std::atomic<int> flipReports{0};
+            if (flipReports.fetch_add(1, std::memory_order_relaxed) < 40) std::fprintf(stderr, "[flip] reserved index=%d pending=%u count=%llu\n", info.index, static_cast<unsigned>(cfg->flipStatus.flipPendingNum), static_cast<unsigned long long>(cfg->flipStatus.count));
+        }
         if (info.index >= 0) ++cfg->bufferPending[info.index];
         if (info.index >= 0 && cfg->buffers[info.index].Occupied() && cfg->buffers[info.index].groupIndex < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX && cfg->groups[cfg->buffers[info.index].groupIndex].occupied) {
             request->group = cfg->groups[cfg->buffers[info.index].groupIndex];
@@ -201,6 +205,10 @@ FlipRequest::~FlipRequest() {
 void FlipRequest::ReleaseLocked() noexcept {
     if (!reserved || terminal) return;
     --cfg->flipStatus.flipPendingNum;
+    if (std::getenv("APS5_TRACE_FLIPS") != nullptr) {
+        static std::atomic<int> releaseReports{0};
+        if (releaseReports.fetch_add(1, std::memory_order_relaxed) < 40) std::fprintf(stderr, "[flip] released index=%d pending=%u count=%llu\n", index, static_cast<unsigned>(cfg->flipStatus.flipPendingNum), static_cast<unsigned long long>(cfg->flipStatus.count));
+    }
     --queue->reservations;
     if (index >= 0) {
         --cfg->bufferPending[index];
@@ -542,7 +550,8 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         }
         require(req.cfg->outputMode != VIDEO_OUT_OUTPUT_MODE_119_88HZ || SupportsHighFrameRate(), "display no longer supports 119.88 Hz output");
         require(req.ready && !req.terminal && req.generation == req.cfg->generation, "stale or incomplete flip request");
-        const auto interval = static_cast<uint64_t>(req.flipRate + 1);
+        static const int rateOverride = [] { const char* text = std::getenv("APS5_FLIP_RATE_OVERRIDE"); return text ? std::atoi(text) : -1; }();
+        const auto interval = static_cast<uint64_t>((rateOverride >= 0 ? rateOverride : req.flipRate) + 1);
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
         const auto target = req.cfg->lastFlipVblank + interval;
         timing.Mark("validate");

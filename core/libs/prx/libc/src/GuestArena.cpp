@@ -317,6 +317,17 @@ private:
     void* Claim(std::uintptr_t candidate, std::size_t bytes) {
         if (candidate == 0) throw std::runtime_error("guest address space arena exhausted");
         _used.emplace(candidate, candidate + bytes);
+        // Mission 27: the video frame pool. The guest's decoded-picture buffers are minted here
+        // (the arena is the only source of a guest VA), and they must be GPU-visible for the
+        // graphics path to reach them. Log the allocation so the caller and the registration
+        // state are measurable rather than inferred.
+        static const bool traceAllocations = std::getenv("APS5_TRACE_ALLOCATIONS") != nullptr;
+        if (traceAllocations && bytes >= 1024 * 1024 && bytes <= 64 * 1024 * 1024) {
+            std::fprintf(stderr, "[arena] the guest allocated 0x%llx+0x%zx (%llu KiB) at 0x%llx\n",
+                         static_cast<unsigned long long>(candidate), bytes,
+                         static_cast<unsigned long long>(bytes / 1024),
+                         static_cast<unsigned long long>(candidate));
+        }
         return reinterpret_cast<void*>(candidate);
     }
 

@@ -139,10 +139,20 @@ void ShaderResources::prepareAddressBindings(std::span<const CompiledShader> sha
     if (usesBda) {
         Require(context.bufferDeviceAddress, "buffer device address is not enabled");
         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+        static const bool traceAddress = std::getenv("APS5_TRACE_ADDRESS_BUILD") != nullptr;
+        static std::atomic<int> addressReports{0};
+        const auto acquireStart = (profile || traceAddress) ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         guestMemory.AcquireRegistered();
+        const auto acquireMs = (profile || traceAddress) ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStart).count() : 0.0;
         const auto snapshotsStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         for (const auto& snapshot : snapshots) guestMemory.AddSnapshot(snapshot);
         if (profile) GuestBufferMemory::CountAddressBuild(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - snapshotsStart).count());
+        if (traceAddress) {
+            const auto snapshotMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snapshotsStart).count();
+            if (acquireMs + snapshotMs > 200.0 || addressReports.fetch_add(1, std::memory_order_relaxed) < 4) {
+                std::fprintf(stderr, "[address-build] AcquireRegistered=%.1fms snapshots=%zu AddSnapshot=%.1fms\n", acquireMs, snapshots.size(), snapshotMs);
+            }
+        }
     }
 }
 

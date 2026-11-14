@@ -71,6 +71,17 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     const auto width = (((words[1] >> 30u) & 0x3u) | (((words[2] >> 0u) & 0xfffu) << 2u)) + 1u;
     const auto height = ((words[2] >> 14u) & 0x3fffu) + 1u;
 
+    // Mission 27: the decisive measurement for the video path. Every descriptor the guest
+    // writes is named here, so a descriptor for the decoder's frame buffer is visible even
+    // when the format or the tile mode is one the driver cannot use. A descriptor that is
+    // refused below is named too, so "the guest never named it" and "the driver refused it"
+    // are distinguishable.
+    static const bool traceDescriptors = std::getenv("APS5_TRACE_TEXTURE_DESCRIPTORS") != nullptr;
+    if (traceDescriptors)
+        std::fprintf(stderr, "[texture-descriptor] base=0x%llx extent=%ux%u format=%u dwords=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                     static_cast<unsigned long long>(baseAddress), width, height, format,
+                     words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+
     const auto dstSelX = (words[3] >> 0u) & 0x7u;
     const auto dstSelY = (words[3] >> 3u) & 0x7u;
     const auto dstSelZ = (words[3] >> 6u) & 0x7u;

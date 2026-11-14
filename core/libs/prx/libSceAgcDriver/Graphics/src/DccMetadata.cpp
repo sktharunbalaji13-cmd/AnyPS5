@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -468,10 +469,12 @@ std::size_t DccKeyBytes(std::uint64_t surfaceBytes) {
 
 std::size_t DccKeyCount(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint64_t surfaceBytes) {
     const auto keys = DccKeyBytes(surfaceBytes);
-    if (tileMode != TextureTileMode::kR64KBX || elementBytes != 4) return keys;
-    constexpr std::uint64_t MetaBlockEdge = 512;
+    if (tileMode != TextureTileMode::kR64KBX || elementBytes == 0 || elementBytes > 16 || !std::has_single_bit(elementBytes)) return keys;
     constexpr std::uint64_t MetaBlockBytes = 4096;
-    const auto console = (width + MetaBlockEdge - 1) / MetaBlockEdge * ((height + MetaBlockEdge - 1) / MetaBlockEdge) * MetaBlockBytes;
+    const auto texelsLog2 = std::countr_zero(MetaBlockBytes * KeyBytes / elementBytes);
+    const std::uint64_t blockWidth = 1ull << ((texelsLog2 + 1) / 2);
+    const std::uint64_t blockHeight = 1ull << (texelsLog2 / 2);
+    const auto console = (width + blockWidth - 1) / blockWidth * ((height + blockHeight - 1) / blockHeight) * MetaBlockBytes;
     return std::max(keys, static_cast<std::size_t>(console));
 }
 
@@ -479,6 +482,19 @@ std::size_t DccKeyCount(const GuestTextureResource& surface, std::uint64_t surfa
     const bool single = surface.mipCount == 1 && surface.baseArray == 0 && surface.depthOrLastArray == 0 && (surface.dimension == TextureDimension::k2D || surface.dimension == TextureDimension::k2DArray);
     if (!single || !surface.dccPipeAligned || surface.tileMode != TextureTileMode::kR64KBX) return DccKeyBytes(surfaceBytes);
     return DccKeyCount(surface.tileMode, BytesPerElement(surface.format), surface.width, surface.height, surfaceBytes);
+}
+
+std::uint64_t ConsoleDccAddress(const GuestTextureResource& surface, std::uint64_t surfaceBytes) {
+    // The guest's descriptor names the title's copy of a surface's DCC; the console addresses its
+    // own copy one pipe-aligned DCC later. Measured for Ghost of Tsushima: the title's keys are
+    // at 0x15068f0000 and the console's at 0x1506918000, one 0x28000-byte DCC apart, and the same
+    // for the second display buffer (0x1508920000 and 0x1508948000). The console's present path
+    // reads the keys at its own address, so the surface's key state has to be read and written
+    // there: the two models must see the same bytes.
+    if (surface.dccAddress == 0) return 0;
+    const bool single = surface.mipCount == 1 && surface.baseArray == 0 && surface.depthOrLastArray == 0 && (surface.dimension == TextureDimension::k2D || surface.dimension == TextureDimension::k2DArray);
+    if (!single || !surface.dccPipeAligned || surface.tileMode != TextureTileMode::kR64KBX) return surface.dccAddress;
+    return surface.dccAddress;  // RED PROBE
 }
 
 namespace {
@@ -502,9 +518,12 @@ DccKeys readDccKeys(std::uint64_t metaAddress, std::size_t count, bool& memoized
             return DccKeys::Mixed;
         }
         PublishShadow(metaAddress, count, PublishScope::Whole, PublishReason::Keys);
-        if (auto* recorder = Recorder::Active()) {
+        // The publish notes its copies as pending writes, so waiting through the keys' newest
+        // writer is enough, and nothing needs a wait when neither the publish nor another
+        // recorded write covers them (a stale unit's slab is dropped, not copied).
+        if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(metaAddress, count)) {
             Recorder::CountSync(2);
-            recorder->Sync();
+            recorder->SyncThrough(metaAddress, count);
         }
     }
     const auto* keys = reinterpret_cast<const std::uint8_t*>(metaAddress);
@@ -609,6 +628,22 @@ std::optional<DccKeys> KnownPendingDccKeys(std::uint64_t metaAddress, std::uint6
 
 bool IsDccClear(DccKeys keys) {
     return keys == DccKeys::Clear0000 || keys == DccKeys::Clear0001 || keys == DccKeys::Clear1110 || keys == DccKeys::Clear1111 || keys == DccKeys::ClearRegister;
+}
+
+std::optional<std::uint8_t> LandedUniformMetadataByte(std::uint64_t address, std::size_t bytes) {
+    if (address == 0 || bytes == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes)) return std::nullopt;
+    if (AnyShadowedOverlaps(address, bytes)) PublishShadow(address, bytes, PublishScope::Whole, PublishReason::Keys);
+    if (AnyShadowedOverlaps(address, bytes)) return std::nullopt;
+    GuestMemory::FlushGpuWrites(address, bytes);
+    auto* recorder = GuestMemory::GpuMutex().HeldByThisThread() ? Recorder::Active() : nullptr;
+    if (recorder != nullptr && recorder->PendingWriteOverlaps(address, bytes)) {
+        const auto landed = KeysAfterPendingWrites(*recorder, address, bytes);
+        if (landed.mixed || landed.unknown || landed.value < 0) return std::nullopt;
+        return static_cast<std::uint8_t>(landed.value);
+    }
+    const auto* data = reinterpret_cast<const std::uint8_t*>(address);
+    if (!AllKeysEqual(data + 1, bytes - 1, data[0])) return std::nullopt;
+    return data[0];
 }
 
 void MarkDccUncompressed(std::uint64_t metaAddress, std::uint64_t surfaceBytes) {

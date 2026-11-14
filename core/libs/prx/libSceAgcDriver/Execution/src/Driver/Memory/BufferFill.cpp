@@ -134,6 +134,26 @@ std::optional<Graphics::MemoryValueFill> MatchMemoryValueBufferFill(std::span<co
     return fill;
 }
 
+std::optional<DwordPatternFill> MatchSgprPatternFill(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
+    if (userData.size() != 9 || packet.size() < 5 || !compute.groupIdEnable[0] || compute.numThreads[0] != 64 || compute.numThreads[1] != 1 || compute.numThreads[2] != 1) return std::nullopt;
+    static constexpr std::array<std::uint32_t, 23> kernel{
+        0xbfa00001u, 0xd7460004u, 0x04010c09u, 0x7e000204u, 0x7e020205u, 0x7e040206u, 0x7e060207u, 0x7da80808u,
+        0xbf88000du, 0x360a0883u, 0xbe84047eu, 0xbe86047eu, 0x7e100505u, 0x7da40a08u, 0xbefc0308u, 0x7e0c8700u,
+        0x8a867e06u, 0xbefe0406u, 0xbf85fff9u, 0xbefe0404u, 0xe0102000u, 0x80000604u, 0xbf810000u};
+    if (code.size() < kernel.size() || !std::equal(kernel.begin(), kernel.end(), code.begin())) return std::nullopt;
+    const auto stride = (userData[1] >> 16u) & 0x3fffu;
+    const bool swizzled = ((userData[1] >> 31u) & 1u) != 0;
+    const bool addTid = ((userData[3] >> 23u) & 1u) != 0;
+    const auto outOfBounds = (userData[3] >> 28u) & 3u;
+    const auto format = (userData[3] >> 12u) & 0x7fu;
+    const auto type = userData[3] >> 30u;
+    if (type != 0 || stride != 4 || swizzled || addTid || outOfBounds > 1u || format < 20u || format > 22u || (packet[4] & 0x20u) != 0 || packet[2] != 1 || packet[3] != 1) return std::nullopt;
+    const auto dwords = std::min<std::uint64_t>({static_cast<std::uint64_t>(packet[1]) * 64u, userData[8], userData[2]});
+    if (dwords == 0) return std::nullopt;
+    const auto base = userData[0] | (static_cast<std::uint64_t>(userData[1] & 0xffffu) << 32u);
+    return DwordPatternFill{base, static_cast<std::size_t>(dwords * 4u), {userData[4], userData[5], userData[6], userData[7]}};
+}
+
 bool IsByteFill(const std::array<std::uint32_t, 4>& pattern) {
     return std::all_of(pattern.begin(), pattern.end(), [&](std::uint32_t word) { return word == (pattern[0] & 0xffu) * 0x01010101u; });
 }
@@ -294,8 +314,14 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
             recordLabelsForPacket(localDevice.get(), queueId);
             if (!GuestMemory::Accessible(reinterpret_cast<const void*>(source), sizeof(pattern))) return false;
             GuestMemory::Read(source, std::as_writable_bytes(std::span(pattern)), 4);
+            if (std::getenv("APS5_TRACE_DCC_KEYS") != nullptr) {
+                std::fprintf(stderr, "[dcc-keys] chain copy from 0x%llx to 0x%llx+0x%zx with %08x %08x %08x %08x\n", static_cast<unsigned long long>(source), static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3]);
+            }
         } else {
             pattern = {userData[4], userData[5], userData[6], userData[7]};
+            if (std::getenv("APS5_TRACE_DCC_KEYS") != nullptr) {
+                std::fprintf(stderr, "[dcc-keys] uniform fill of 0x%llx+0x%zx with %08x %08x %08x %08x (SGPRs)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3]);
+            }
         }
     }
     if (queueId == 0 && DrawPipeline::Active() && inputLock.owns_lock()) inputLock.unlock();

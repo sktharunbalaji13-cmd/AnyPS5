@@ -276,6 +276,14 @@ void* allocate(GuestAllocations::Mutation& mutation, std::size_t alignment, std:
         rawFree(raw, blockBytes);
         throw;
     }
+    // Mission 27: the video frame pool. The guest's decoded-picture buffer must be
+    // GPU-visible for the graphics path to reach it. Log the allocation and its GPU
+    // registration so the caller's choice is measurable rather than inferred.
+    static const bool traceAllocations = std::getenv("APS5_TRACE_ALLOCATIONS") != nullptr;
+    if (traceAllocations && bytes >= 1024 * 1024 && bytes <= 64 * 1024 * 1024) {
+        std::fprintf(stderr, "[guestheap] the guest allocated %p+0x%zx (%llu KiB) gpu=%d\n",
+                     pointer, bytes, static_cast<unsigned long long>(bytes / 1024), gpu ? 1 : 0);
+    }
     grow(usage().inUse, usage().maxInUse, blockBytes);
     return pointer;
 }

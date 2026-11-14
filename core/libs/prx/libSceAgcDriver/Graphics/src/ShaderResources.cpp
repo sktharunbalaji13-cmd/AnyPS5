@@ -1221,11 +1221,26 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     const auto resource = StorageSurface(context, viewed);
     const StorageKey key{context.device, SurfaceKey(context, resource)};
     auto& cache = StorageTextures();
+    static const bool traceReentry = std::getenv("APS5_TRACE_STORAGE_REENTRY") != nullptr;
+    if (traceReentry && storageCacheHeld != 0) {
+        const auto packet = GuestMemory::CurrentPacket();
+        std::fprintf(stderr, "[storage-cache-reentry] address=0x%llx extent=%ux%u format=%u mip=%u cache_depth=%u caller=+0x%llx packet=0x%x queue=0x%x\n",
+                     static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height,
+                     resource.format, mip, storageCacheHeld, GuestMemory::CodeOffset(__builtin_return_address(0)),
+                     packet.opcode, packet.queue);
+    }
+    // Mission 28: the live multisampled color target this surface mirrors, pinned before the cache
+    // lock. The resolve then runs after the lock is released and takes no target mutex, so the
+    // guard's order (targets, then the cache) is never inverted and no queue worker stalls behind it.
+    ColorTarget mirror{};
+    const auto mirrorOwner = PinMultisampleSurfaceOwner(context, resource, mip, mirror);
+    bool created = false;
     std::vector<std::shared_ptr<StorageTexture>> evicted;
     std::shared_ptr<StorageTexture> texture;
     {
         std::lock_guard lock(cache.mutex);
         const CacheHold held(storageCacheHeld);
+        if (traceReentry) CaptureTrace::Log("storage-cache-held image=%llx extent=%ux%u depth=%u", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, storageCacheHeld);
         if (resource.mipCount > AllocatedLevels(resource)) {
             auto allocated = resource;
             allocated.mipCount = AllocatedLevels(resource);
@@ -1245,7 +1260,8 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
         } else {
             if (guestBytes == 0) guestBytes = DescribeSurface(resource).guestBytes;
             if (StorageTexture::FlushPending(resource.baseAddress, static_cast<std::size_t>(guestBytes), nullptr, "storage image creation", PublishScope::None) && profile) start = LookupOutcomes::Add(LookupOutcomes::PendingFlush, start);
-            CachedStorageTexture entry{key, mip, StorageTexture::Create(context, *context.detiler, resource, mip)};
+            CachedStorageTexture entry{key, mip, StorageTexture::Create(context, *context.detiler, resource, mip, mirrorOwner != nullptr ? mirror.bytes : 0u)};
+            created = true;
             static const bool keepNew = std::getenv("APS5_NO_KEEP_NEW_STORAGE") == nullptr;
             if (auto* recorder = Recorder::Active(); keepNew && recorder != nullptr && GuestMemory::GpuMutex().HeldByThisThread() && recorder->Recording()) recorder->Keep(entry.texture);
             entry.accounted = heldBytes(*entry.texture);
@@ -1261,6 +1277,9 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
             if (profile) LookupOutcomes::Add(LookupOutcomes::StorageMade, start);
         }
     }
+    // Mission 28: the image exists and the cache lock is released, so the target's real content can
+    // go into it without re-entering the cache or inverting the guard's lock order.
+    if (created && texture != nullptr && mirrorOwner != nullptr) ResolvePinnedMultisampleTarget(context, mirrorOwner, mirror, *texture, texture->AttachmentView(mirror.format, mip));
     for (const auto& image : evicted) {
         std::vector<std::shared_ptr<ShaderResources>> resources;
         SharedResourceCache().RemoveImage(image.get(), &resources);
@@ -1626,12 +1645,31 @@ ShaderResources::ShaderResources(const Context& context, const CompiledShader& c
 
 void ShaderResources::Complete() {
     Require(!completed, "shader resources were already completed");
+    // APS5_TRACE_COMPLETE: the build's own counters leave a multi-second wall time unattributed
+    // (VulkanDevice reports it as "address bindings (bda)"), so time the three parts directly.
+    static const bool traceComplete = std::getenv("APS5_TRACE_COMPLETE") != nullptr;
+    static std::atomic<int> completeReports{0};
+    const auto traceStart = traceComplete ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const std::span<const CompiledShader> shaders(&deferredCompute, 1);
+    double prepareAddressMs = 0.0;
+    double buildPrepareMs = 0.0;
     if (lockedBuild) {
+        const auto addressStart = traceComplete ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         prepareAddressBindings(shaders, deferredSnapshots);
+        if (traceComplete) prepareAddressMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - addressStart).count();
+        const auto prepareStart = traceComplete ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         buildPrepare(shaders, nullptr, 0, 0, 0);
+        if (traceComplete) buildPrepareMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
     }
     buildComplete();
+    if (traceComplete) {
+        const auto total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traceStart).count();
+        // Report every slow build, plus a few fast ones for contrast.
+        if (total > 200.0 || completeReports.fetch_add(1, std::memory_order_relaxed) < 6) {
+            std::fprintf(stderr, "[complete-trace] total=%.1fms prepareAddressBindings=%.1fms buildPrepare=%.1fms buildComplete=%.1fms lockedBuild=%d\n",
+                         total, prepareAddressMs, buildPrepareMs, total - prepareAddressMs - buildPrepareMs, lockedBuild ? 1 : 0);
+        }
+    }
     forgetDeferredInputs();
 }
 
@@ -4221,6 +4259,14 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         counters.elements.fetch_add(1, std::memory_order_relaxed);
         if (!written) counters.readOnly.fetch_add(1, std::memory_order_relaxed);
     }
+    // Mission 27: name every guest buffer a draw binds. The decoded video picture is a
+    // guest buffer, and if the guest copies it into its own surfaces the copy's source
+    // buffer has to appear here.
+    static const bool traceBuffers = std::getenv("APS5_TRACE_SAMPLED_TEXTURES") != nullptr;
+    if (traceBuffers)
+        std::fprintf(stderr, "[guest-buffer] address=0x%llx bytes=%llu written=%d read=%d atomic=%d\n",
+                     static_cast<unsigned long long>(address), static_cast<unsigned long long>(byteSize),
+                     written ? 1 : 0, read ? 1 : 0, atomic ? 1 : 0);
     allocations.push_back({address, size, true, nullptr, ShaderRecompiler::DescriptorRole::ShaderData, written});
     return allocations.size() - 1;
 }
@@ -4696,6 +4742,40 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             textureBaseLevel.push_back(baseLevel);
             textureSrgb.push_back(forcedSrgb);
             describedRanges.push_back({"texture", resource.baseAddress, guestBytes, resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), resource.dccAddress});
+            // Mission 27: name the texture this draw samples. The black frame's cause is
+            // unknown, and "which texture does the full-screen triangle read" is the one
+            // measurement that says whether the sampled image holds the picture.
+            static const bool traceSampled = std::getenv("APS5_TRACE_SAMPLED_TEXTURES") != nullptr;
+            if (traceSampled)
+                std::fprintf(stderr, "[sampled-texture] element=%u base=0x%llx bytes=%llu extent=%ux%u format=%u tile=%d dcc=0x%llx\n",
+                             element, static_cast<unsigned long long>(resource.baseAddress),
+                             static_cast<unsigned long long>(guestBytes), resource.width, resource.height,
+                             resource.format, static_cast<int>(resource.tileMode),
+                             static_cast<unsigned long long>(resource.dccAddress));
+            static const bool traceContent = std::getenv("APS5_TRACE_SAMPLED_TEXTURE_CONTENT") != nullptr;
+            if (traceContent) {
+                static std::atomic<int> contentReports{0};
+                if (contentReports.fetch_add(1) < 96) {
+                    constexpr std::size_t window = 512u;
+                    constexpr std::size_t windows = 32u;
+                    std::vector<std::byte> sample;
+                    std::size_t nonzero = 0;
+                    unsigned maximum = 0;
+                    const auto total = static_cast<std::size_t>(guestBytes);
+                    for (std::size_t index = 0; index < windows; ++index) {
+                        if (total < window) break;
+                        const auto offset = (total - window) * index / (windows - 1u);
+                        sample.resize(window);
+                        GuestMemory::ReadCommitted(resource.baseAddress + offset, sample);
+                        for (const auto byte : sample) {
+                            const auto value = std::to_integer<unsigned>(byte);
+                            if (value != 0u) ++nonzero;
+                            maximum = std::max(maximum, value);
+                        }
+                    }
+                    std::fprintf(stderr, "[sampled-texture-content] base=0x%llx extent=%ux%u sampled=%zu accessible=%d nonzero=%zu max=%u generation=%llu\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, sample.size() * windows, GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), std::min<std::size_t>(total, window)) ? 1 : 0, nonzero, maximum, static_cast<unsigned long long>(GuestMemory::CollectWritesUncached(resource.baseAddress, static_cast<std::size_t>(guestBytes))));
+                }
+            }
             item.imageAllocations.push_back(textures.size() - 1);
         }
         // The line is due even when every element took the fast path (cachedTexture reports too).
@@ -4755,6 +4835,14 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
         storageAtomic.push_back(element < binding.imageAtomic.size() && binding.imageAtomic[element]);
         storageAtomic64.push_back(element < binding.imageAtomic64.size() && binding.imageAtomic64[element]);
         describedRanges.push_back({"storage", resource.baseAddress, guestBytes, resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), resource.dccAddress});
+        // Mission 27: name the storage image too, so a draw's whole binding set is visible.
+        static const bool traceStorage = std::getenv("APS5_TRACE_SAMPLED_TEXTURES") != nullptr;
+        if (traceStorage)
+            std::fprintf(stderr, "[storage-image] element=%u base=0x%llx bytes=%llu extent=%ux%u format=%u tile=%d dcc=0x%llx written=%d\n",
+                         element, static_cast<unsigned long long>(resource.baseAddress),
+                         static_cast<unsigned long long>(guestBytes), resource.width, resource.height,
+                         resource.format, static_cast<int>(resource.tileMode),
+                         static_cast<unsigned long long>(resource.dccAddress), written ? 1 : 0);
         item.imageAllocations.push_back(storageTextures.size() - 1);
     }
 }
@@ -5532,6 +5620,7 @@ bool SkipWriteBack() {
     return skip;
 }
 }
+
 
 void ShaderResources::WriteBack() {
     WriteBackBuffers();

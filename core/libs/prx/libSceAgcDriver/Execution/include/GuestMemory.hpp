@@ -146,6 +146,10 @@ public:
     // current acquisition is the outermost, so code that releases the mutex around a wait
     // (Recorder::SyncThrough for the flush hook) gives up no caller's hold.
     std::uint32_t DepthOnThisThread() const;
+    // The holder's thread token, for a stuck-wait report that must name who holds the lock.
+    const void* OwnerThreadToken() const;
+    // The calling thread's own token, the same value a hold stores, for that comparison.
+    const void* ThisThreadToken() const;
 
 private:
     void acquired();
@@ -194,7 +198,7 @@ unsigned long long CodeOffset(const void* address);
 // memory is read; it registers a hook that stores every pending result overlapping a range, which
 // every read and store through this interface calls first. Code that reads guest memory directly
 // calls FlushGpuWrites itself.
-void SetFlushHook(void (*hook)(std::uint64_t address, std::size_t bytes));
+void SetFlushHook(void (*hook)(std::uint64_t address, std::size_t bytes));
 void SetReadGuard(void (*guard)(std::uint64_t address, std::size_t bytes));
 void GuardRead(std::uint64_t address, std::size_t bytes);
 void FlushGpuWrites(std::uint64_t address, std::size_t bytes);

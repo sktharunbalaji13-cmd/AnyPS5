@@ -14,10 +14,38 @@
 #include <cstdlib>
 #include <functional>
 #include <shared_mutex>
+#include <array>
+#include <atomic>
 
 namespace AgcDriver::DriverDetail {
 
 namespace {
+
+std::array<std::atomic<std::uint64_t>, 256>& opcodeCensus() {
+    static std::array<std::atomic<std::uint64_t>, 256> counts{};
+    return counts;
+}
+
+std::atomic<std::uint64_t>& opcodeCensusTotal() {
+    static std::atomic<std::uint64_t> total{0};
+    return total;
+}
+
+void noteOpcode(std::uint32_t opcode) {
+    static const bool enabled = std::getenv("APS5_OPCODE_CENSUS") != nullptr;
+    if (!enabled) return;
+    opcodeCensus()[opcode & 0xffu].fetch_add(1, std::memory_order_relaxed);
+    const auto total = opcodeCensusTotal().fetch_add(1, std::memory_order_relaxed) + 1u;
+    if (total % 5000u != 0u) return;
+    static std::atomic<int> dumps{0};
+    if (dumps.fetch_add(1) >= 4) return;
+    std::fprintf(stderr, "[opcode-census] at %llu packets\n", static_cast<unsigned long long>(total));
+    for (std::uint32_t index = 0; index < 256u; ++index) {
+        const auto count = opcodeCensus()[index].load(std::memory_order_relaxed);
+        if (count == 0) continue;
+        std::fprintf(stderr, "[opcode-census]   0x%02x %-26s x%llu\n", index, Pm4::Name(0xc0000000u | (index << 8u) | 2u).c_str(), static_cast<unsigned long long>(count));
+    }
+}
 
 constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
 
@@ -212,6 +240,7 @@ void Driver::execute(const Submission& submission) {
         const auto count = Pm4::PacketWords(header);
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         const auto opcode = (header >> 8u) & 0xffu;
+        noteOpcode(opcode);
         auto nextCursor = cursor + count;
         if (APS5_ENABLE_TIMING_LOG && submission.queue == 0 && pendingFrameTiming == nullptr) includeTimingSubmission(submission, false);
         PerformanceContext timingContext(submission.queue == 0 ? pendingFrameTiming.get() : FrameTiming::Async());
@@ -263,6 +292,8 @@ void Driver::execute(const Submission& submission) {
         }
 
         const auto flushStart = profilePackets ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        static const bool tracePackets = std::getenv("APS5_TRACE_PACKETS") != nullptr;
+        if (tracePackets) std::fprintf(stderr, "[packet-trace] serial=%llu queue=0x%x opcode=0x%x cursor=0x%zx header=0x%x\n", static_cast<unsigned long long>(submission.serial), submission.queue, opcode, static_cast<std::size_t>(cursor), header);
         flushBetweenPackets(submission.queue, header, opcode == 0x49 || opcode == 0x37);
         timing.Mark("flush_between_packets");
         PacketTimer packetTimer{profilePackets, header == FlipPacketHeader ? 0xffffu : opcode, submission.queue, packetProfile, std::chrono::steady_clock::now()};

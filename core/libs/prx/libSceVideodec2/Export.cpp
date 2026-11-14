@@ -14,6 +14,7 @@
 #include <limits>
 #include <stdexcept>
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -325,6 +326,61 @@ bool Trace() {
     return trace;
 }
 
+// Mission 27: the decode's own trace. The decode produced no picture for the title's
+// three access units, and nothing said why. These probes report what the decoder was
+// handed and what libavcodec said about it, so the cause is a measurement and not a guess.
+bool VerboseTrace() {
+    static const bool trace = std::getenv("APS5_TRACE_VIDEODEC_VERBOSE") != nullptr;
+    return trace;
+}
+
+// The directory the access units are dumped to, so the same bytes can be decoded offline.
+const char* DumpDirectory() {
+    static const char* directory = std::getenv("APS5_DUMP_VIDEODEC_AU");
+    return directory;
+}
+
+// The NAL types of an Annex B buffer, in order, up to a limit.
+void TraceNals(const std::uint8_t* bytes, std::size_t size, const char* label) {
+    if (!VerboseTrace()) return;
+    char types[256] = {0};
+    std::size_t count = 0;
+    for (std::size_t index = 0; index + 4 < size; ++index) {
+        if (bytes[index] != 0 || bytes[index+1] != 0 || bytes[index+2] != 1) continue;
+        const auto type = bytes[index + 3] & 0x1fu;
+        if (count < 24) {
+            std::snprintf(types + std::strlen(types), sizeof(types) - std::strlen(types), "%s%u", count == 0 ? "" : ",", type);
+        }
+        ++count;
+    }
+    std::fprintf(stderr, "[videodec2] %s nal types (%zu found): %s\n", label, count, types);
+}
+
+// The first bytes of a buffer, in hex.
+void TraceHead(const std::uint8_t* bytes, std::size_t size, const char* label) {
+    if (!VerboseTrace()) return;
+    char head[256] = {0};
+    for (std::size_t index = 0; index < size && index < 48; ++index)
+        std::snprintf(head + std::strlen(head), sizeof(head) - std::strlen(head), "%02x", bytes[index]);
+    std::fprintf(stderr, "[videodec2] %s head: %s\n", label, head);
+}
+
+// The access unit, written to disk so it can be decoded outside the game.
+void DumpAccessUnit(std::uint64_t index, const std::uint8_t* bytes, std::size_t size) {
+    const char* directory = DumpDirectory();
+    if (directory == nullptr) return;
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/videodec_au_%llu.bin", directory, static_cast<unsigned long long>(index));
+    std::FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "[videodec2] the access unit dump failed: %s\n", path);
+        return;
+    }
+    std::fwrite(bytes, 1, size, file);
+    std::fclose(file);
+    std::fprintf(stderr, "[videodec2] dumped the access unit %llu: %zu bytes to %s\n", static_cast<unsigned long long>(index), size, path);
+}
+
 std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
@@ -405,15 +461,38 @@ void Receive(Decoder& decoder) {
         FramePointer frame(av_frame_alloc());
         if (!frame) throw std::runtime_error("Videodec2: cannot allocate frame");
         const int result = avcodec_receive_frame(decoder.context, frame.get());
-        if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) return;
-        if (result < 0 || frame->decode_error_flags != 0) throw std::runtime_error("Videodec2: frame decoding failed");
+        if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
+            if (VerboseTrace())
+                std::fprintf(stderr, "[videodec2] receive: %s (ready=%zu)\n",
+                             result == AVERROR(EAGAIN) ? "EAGAIN" : "EOF", decoder.ready.size());
+            return;
+        }
+        if (result < 0 || frame->decode_error_flags != 0) {
+            if (VerboseTrace())
+                std::fprintf(stderr, "[videodec2] receive failed: result=%d (%s) error_flags=0x%x\n",
+                             result, av_err2str(result), frame->decode_error_flags);
+            throw std::runtime_error("Videodec2: frame decoding failed");
+        }
+        if (VerboseTrace())
+            std::fprintf(stderr, "[videodec2] receive: a picture %ux%u format=%s pts=%lld key=%d\n",
+                         frame->width, frame->height, av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
+                         static_cast<long long>(frame->pts), (frame->flags & AV_FRAME_FLAG_KEY) != 0);
         decoder.ready.push_back(std::move(frame));
     }
 }
 
 void Send(Decoder& decoder, const AVPacket* packet) {
     const int result = avcodec_send_packet(decoder.context, packet);
-    if (result < 0) throw std::runtime_error("Videodec2: packet submission failed");
+    if (result < 0) {
+        if (VerboseTrace())
+            std::fprintf(stderr, "[videodec2] send failed: result=%d (%s) size=%d\n",
+                         result, av_err2str(result), packet != nullptr ? packet->size : -1);
+        throw std::runtime_error("Videodec2: packet submission failed");
+    }
+    if (VerboseTrace())
+        std::fprintf(stderr, "[videodec2] send: accepted result=%d size=%d pts=%lld\n",
+                     result, packet != nullptr ? packet->size : -1,
+                     packet != nullptr ? static_cast<long long>(packet->pts) : -1LL);
     Receive(decoder);
 }
 
@@ -470,6 +549,54 @@ void EmitDecoded(std::uint64_t handle, Decoder& decoder, FrameBuffer* frame, Out
     if (decoder.context->level > 0) decoder.level = static_cast<std::uint32_t>(decoder.context->level);
     if (!WriteNv12(decoder, *picture, static_cast<std::uint8_t*>(frame->frameBuffer), frame->frameBufferSize)) throw std::runtime_error("Videodec2: NV12 conversion failed");
     const auto pitch = AlignUp(decoder.width, PitchAlignment);
+    // Mission 27: the decisive measurement for the video path, taken AFTER the picture is
+    // written. On the console the frame buffer is caller-owned GPU-visible memory and AGC
+    // binds that exact pointer. This reports whether the pool is registered and GPU-visible,
+    // and measures the written luma plane's content, so "the picture was written but the GPU
+    // cannot see it" is a measurement rather than an inference.
+    if (VerboseTrace() && frame->frameBuffer != nullptr) {
+        int readable = -1;
+        int writable = -1;
+        int gpu = -1;
+        std::size_t rangeBytes = 0;
+        std::uintptr_t rangeBase = 0;
+        std::uintptr_t offset = 0;
+        try {
+            const auto address = reinterpret_cast<std::uintptr_t>(frame->frameBuffer);
+            const auto covering = GuestAllocations::GuestAllocationsLookup_nid_postfix(address, false);
+            if (covering != nullptr) {
+                rangeBase = covering->address;
+                rangeBytes = covering->bytes;
+                offset = address - rangeBase;
+                readable = covering->readable ? 1 : 0;
+                writable = covering->writable ? 1 : 0;
+                gpu = covering->gpu ? 1 : 0;
+            }
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[videodec2] the frame buffer %p lookup failed: %s\n",
+                         frame->frameBuffer, error.what());
+        }
+        // The luma plane's own statistics: the plane's maximum, the number of bytes that
+        // are not zero, and whether the chroma plane varies off its neutral value.
+        const auto* luma = static_cast<const std::uint8_t*>(frame->frameBuffer);
+        const std::size_t lumaBytes = static_cast<std::size_t>(pitch) * decoder.height;
+        std::uint8_t maximum = 0;
+        std::size_t nonzero = 0;
+        for (std::size_t i = 0; i < lumaBytes && i < frame->frameBufferSize; ++i) {
+            if (luma[i] > maximum) maximum = luma[i];
+            if (luma[i] != 0) ++nonzero;
+        }
+        const std::size_t chromaOffset = lumaBytes;
+        bool sawChroma = false;
+        for (std::size_t i = chromaOffset; i < frame->frameBufferSize && i < chromaOffset + 4096; ++i) {
+            if (luma[i] != 0x80) { sawChroma = true; break; }
+        }
+        std::fprintf(stderr, "[videodec2] the picture %p: the range %llx+%llzx offset=%llx readable=%d writable=%d gpu=%d; the luma %ux%u pitch=%u max=%u nonzero=%zu/%zu chroma-varied=%d\n",
+                     frame->frameBuffer, static_cast<unsigned long long>(rangeBase),
+                     static_cast<unsigned long long>(rangeBytes), static_cast<unsigned long long>(offset),
+                     readable, writable, gpu, decoder.width, decoder.height, pitch, maximum, nonzero, lumaBytes,
+                     sawChroma ? 1 : 0);
+    }
     frame->isAccepted = true;
     output->isValid = true;
     output->isErrorFrame = false;
@@ -552,7 +679,7 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
     if (!found) throw std::runtime_error("Videodec2: invalid decoder handle");
     auto& decoder = *found;
     std::lock_guard guard(decoder.mutex);
-    if (Trace() && decoder.decoded < 3) std::fprintf(stderr, "[videodec2] Decode input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(input->thisSize), static_cast<unsigned long long>(frame ? frame->thisSize : 0), static_cast<unsigned long long>(output->thisSize), static_cast<unsigned long long>(input->auSize), static_cast<unsigned long long>(input->ptsData), decoder.width, decoder.height, frame ? frame->frameBuffer : nullptr, static_cast<unsigned long long>(frame ? frame->frameBufferSize : 0));
+    if (Trace() && (decoder.decoded < 3 || decoder.decoded % 64 == 0)) std::fprintf(stderr, "[videodec2] Decode #%llu input=%llu frame=%llu output=%llu au=%llu pts=%llu size=%ux%u fb=%p/%llu\n", static_cast<unsigned long long>(decoder.decoded), static_cast<unsigned long long>(input->thisSize), static_cast<unsigned long long>(frame ? frame->thisSize : 0), static_cast<unsigned long long>(output->thisSize), static_cast<unsigned long long>(input->auSize), static_cast<unsigned long long>(input->ptsData), decoder.width, decoder.height, frame ? frame->frameBuffer : nullptr, static_cast<unsigned long long>(frame ? frame->frameBufferSize : 0));
     ++decoder.decoded;
     const Picture picture{input->ptsData, input->dtsData, input->attachedData};
     if (decoder.flushing) {
@@ -588,8 +715,17 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
         return 0;
     }
     const auto* unit = ToAnnexB(decoder, input->auData, static_cast<std::size_t>(input->auSize));
+    if (VerboseTrace()) {
+        TraceNals(unit->data(), unit->size(), "access unit");
+        TraceHead(unit->data(), unit->size(), "access unit");
+        DumpAccessUnit(decoder.decoded, unit->data(), unit->size());
+
+    }
     if (decoder.codec == CodecAvc && !CarriesAvcSlice(*unit)) {
         decoder.parameterSets.insert(decoder.parameterSets.end(), unit->begin(), unit->end());
+        if (VerboseTrace())
+            std::fprintf(stderr, "[videodec2] the access unit carries no slice: %zu bytes of parameter sets kept\n",
+                         decoder.parameterSets.size());
         EmitDecoded(handle, decoder, frame, output);
         return 0;
     }

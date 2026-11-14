@@ -66,6 +66,14 @@ VkImageView MultisampleTargetStorageView(const Context& context, const GuestText
 // address. The title's multisample target and its single-sample surface share the address
 // it gave them, so a descriptor that names that address addresses the target.
 bool MultisampleTargetCovers(const Context& context, std::uint64_t address);
+// Mission 28: the live multisampled color target whose single-sample surface is exactly this
+// guest surface, pinned so the resolve can run after the caller releases its own locks. `use`
+// receives the target's descriptor. Returns null when no live target owns the surface.
+std::shared_ptr<void> PinMultisampleSurfaceOwner(const Context& context, const GuestTextureResource& surface, std::uint32_t mip, ColorTarget& use);
+// Resolves `use` (pinned by PinMultisampleSurfaceOwner) into `destination`. Takes no target mutex
+// and records only into the recorder's open batch, so it may be called from a storage-image
+// creation path that holds the cache lock or the GPU mutex.
+void ResolvePinnedMultisampleTarget(const Context& context, const std::shared_ptr<void>& owner, const ColorTarget& use, StorageTexture& destination, VkImageView destinationView);
 bool MultisampleTargetStorable(const Context& context, const ColorTarget& target);
 void ResolveMultisampleTarget(const Context& context, const ColorTarget& source, StorageTexture& destination, VkImageView destinationView);
 bool MultisampledColorFillAbsorbs(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);

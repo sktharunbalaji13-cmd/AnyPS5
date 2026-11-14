@@ -54,6 +54,100 @@ int main() {
     std::size_t emptyIndex = 0;
     Require(!DumpDue({}, 10.0, emptyIndex), "an empty schedule never fires");
 
+    // The capture plan: which presents are captured, what the capture is called and what
+    // happens to the index when a present is dropped.
+    {
+        using AgcDriver::CapturePlan;
+
+        // Without a limit nothing is captured at all.
+        CapturePlan plan;
+        Require(!plan.Enabled(), "a plan without a limit is disabled");
+        Require(!plan.Reserve(0.0), "a plan without a limit captures nothing");
+
+        // The count rule: every present, up to the limit.
+        plan = CapturePlan{};
+        plan.limit = 4;
+        Require(plan.Reserve(0.0), "the first present is captured");
+        Require(plan.Index() == 0, "the first capture is frame 0");
+        plan.Commit();
+        Require(plan.Reserve(0.1), "the second present is captured");
+        plan.Commit();
+        Require(plan.Reserve(0.2), "the third present is captured");
+        plan.Commit();
+        Require(plan.Reserve(0.3), "the fourth present is captured");
+        plan.Commit();
+        Require(!plan.Reserve(0.4), "the limit stops the captures");
+        Require(plan.Index() == 4, "the index counts the captures");
+
+        // The spacing in presents.
+        plan = CapturePlan{};
+        plan.limit = 10;
+        plan.every = 3;
+        Require(!plan.Reserve(0.0), "the first present is not captured with every=3");
+        Require(!plan.Reserve(0.1), "the second present is not captured with every=3");
+        Require(plan.Reserve(0.2), "the third present is captured with every=3");
+        plan.Commit();
+
+        // A dropped present gives its index back: the numbering stays contiguous and the
+        // limit still counts the files that were written.
+        plan = CapturePlan{};
+        plan.limit = 2;
+        Require(plan.Reserve(0.0), "the capture is reserved");
+        const int reserved = plan.Index();
+        plan.Release();
+        Require(plan.Index() == reserved, "a dropped present keeps the index");
+        Require(plan.Reserve(0.1), "the next present is captured");
+        Require(plan.Index() == reserved, "the dropped present did not consume an index");
+        plan.Commit();
+        Require(plan.Index() == reserved + 1, "the committed capture consumed the index");
+        Require(plan.Reserve(0.2), "the limit still allows a second capture");
+        plan.Commit();
+        Require(!plan.Reserve(0.3), "the limit counts the captures that were written");
+
+        // A list of capture times replaces the count rule, but the run's first frame is always
+        // captured: a game that stalls before its first capture time still leaves evidence.
+        plan = CapturePlan{};
+        plan.limit = 40;
+        plan.at = ParseDumpTimes("8,9,10");
+        Require(plan.Reserve(1.0), "the run's first frame is captured");
+        Require(plan.Index() == 0, "the first frame is frame 0");
+        plan.Commit();
+        Require(!plan.Reserve(2.0), "a present before the first capture time is not captured");
+        Require(!plan.Reserve(7.9), "a present just before the first capture time is not captured");
+        Require(plan.Reserve(8.0), "the present at the first capture time is captured");
+        Require(plan.Index() == 1, "the scheduled capture is the next file");
+        plan.Commit();
+        Require(!plan.Reserve(8.5), "a capture time fires once");
+        Require(plan.Reserve(9.0), "the present at the second capture time is captured");
+        plan.Commit();
+        Require(plan.Reserve(10.0), "the present at the third capture time is captured");
+        plan.Commit();
+        Require(!plan.Reserve(11.0), "no capture time is left");
+
+        // A dropped first frame is still owed: the next present captures it.
+        plan = CapturePlan{};
+        plan.limit = 40;
+        plan.at = ParseDumpTimes("8");
+        Require(plan.Reserve(1.0), "the run's first frame is captured");
+        plan.Release();
+        Require(plan.Reserve(2.0), "the dropped first frame is captured by the next present");
+        Require(plan.Index() == 0, "the dropped first frame kept the index");
+        plan.Commit();
+        Require(!plan.Reserve(3.0), "the first frame is not captured twice");
+
+        // A dropped scheduled capture gives the capture time back: the moment is captured by
+        // the next present instead of being lost.
+        plan = CapturePlan{};
+        plan.limit = 40;
+        plan.at = ParseDumpTimes("8");
+        Require(plan.Reserve(1.0), "the run's first frame is captured");
+        plan.Commit();
+        Require(plan.Reserve(8.0), "the scheduled capture is reserved");
+        plan.Release();
+        Require(plan.Reserve(8.1), "the dropped scheduled capture is captured by the next present");
+        Require(plan.Index() == 1, "the dropped scheduled capture kept its index");
+    }
+
     std::printf("frame dump schedule tests passed\n");
     return 0;
 }

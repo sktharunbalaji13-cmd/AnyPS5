@@ -52,6 +52,10 @@ public:
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     std::string DeviceName() const;
     std::string DriverInfo() const;
+    // APS5_TRACE_MEMORY: the device's memory heaps with their budget and usage, so that an
+    // allocation failure or an unexplained device loss can be read against the memory that was
+    // actually left. Residency only: the extension reports per-heap usage, not per-object.
+    void ReportMemoryBudget(const char* where) const;
     bool CalibrateClock(double& gpuNs, std::chrono::steady_clock::time_point& cpu) const;
     ShaderRecompiler::SpirvTarget Target() const;
     std::optional<ShaderRecompiler::GeometryStageLimits> GeometryLimits() const;
@@ -359,6 +363,8 @@ private:
     void recordDispatch(RecordedDispatch& record);
     bool present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display = nullptr, const std::shared_ptr<Graphics::StorageTexture>& resident = nullptr, VkFilter residentFilter = VK_FILTER_LINEAR, bool dumpFrame = false, bool residentConvert = false, const VkClearColorValue* uniform = nullptr, std::uint32_t residentLayer = 0, bool passthrough = false);
     void recreateSwapchain(std::uint32_t width, std::uint32_t height, bool force);
+    // Replaces a surface the presentation system lost, and the swapchain made from it.
+    bool recreateSurface(std::uint32_t width, std::uint32_t height);
     void refreshSurfaceFormats();
     void setHdrMetadata();
     void ensureHdrScaler(VkFormat source);

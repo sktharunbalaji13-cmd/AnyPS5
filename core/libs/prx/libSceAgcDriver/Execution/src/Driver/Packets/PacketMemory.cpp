@@ -63,6 +63,16 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
         }
     }
     if (opcode == 0x50 && packet.size() >= 7) {
+        if (std::getenv("APS5_TRACE_DMA_DEST") != nullptr) {
+            static std::atomic<int> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 600) {
+                const auto dmaSource = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+                const auto dmaDestination = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
+                std::fprintf(stderr, "[dma-dest] source=0x%llx destination=0x%llx bytes=%u sourceSel=%u destinationSel=%u\n",
+                             static_cast<unsigned long long>(dmaSource), static_cast<unsigned long long>(dmaDestination),
+                             packet[6] & 0x3ffffffu, Pm4::DmaSource(packet), Pm4::DmaDestination(packet));
+            }
+        }
         if (Pm4::DmaSource(packet) == 0 || Pm4::DmaSource(packet) == 3) Graphics::RequireNoMultisampleTarget(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), packet[6] & 0x3ffffffu, "a DMA copy");
         if (Pm4::DmaSource(packet) == 2 && Pm4::DmaDestination(packet) != 1) {
             const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
@@ -198,6 +208,12 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
         std::lock_guard gpuLock(GuestMemory::GpuMutex());
         static_cast<void>(Graphics::StorageTexture::StoreSmallPending("flip"));
+        // The surfaces above the small cap (the title's video frame surface is 4 MiB) were
+        // skipped here. Published on this thread (the recording thread), never on the
+        // presenter: the presenter holds the GPU mutex across the device wait, which the
+        // recorder's global state cannot survive. Opt-in: the guest's own read of the range
+        // already publishes these surfaces, so this is a second copy of the same work.
+        static_cast<void>(Graphics::StorageTexture::StoreLargePending("flip"));
     }
 
     static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;

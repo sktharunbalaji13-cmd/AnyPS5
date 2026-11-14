@@ -25,6 +25,10 @@ const char* DccKeysName(DccKeys keys);
 std::size_t DccKeyBytes(std::uint64_t surfaceBytes);
 std::size_t DccKeyCount(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint64_t surfaceBytes);
 std::size_t DccKeyCount(const GuestTextureResource& surface, std::uint64_t surfaceBytes);
+// The console's own copy of a surface's DCC: the guest's descriptor names the title's copy, and
+// the console addresses the keys one pipe-aligned DCC later (measured for Ghost of Tsushima:
+// 0x15068f0000 -> 0x1506918000, one 0x28000-byte DCC apart).
+std::uint64_t ConsoleDccAddress(const GuestTextureResource& surface, std::uint64_t surfaceBytes);
 
 template<typename ReadFollowed, typename ReadNamed>
 bool KeysServeSurface(std::uint64_t followedDcc, DccKeys uploaded, DccKeys filled, std::uint64_t namedDcc, ReadFollowed&& readFollowed, ReadNamed&& readNamed) {
@@ -36,6 +40,7 @@ bool KeysServeSurface(std::uint64_t followedDcc, DccKeys uploaded, DccKeys fille
 // The keys covering a surface of `surfaceBytes`, when they all agree.
 DccKeys ReadDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes);
 bool IsDccClear(DccKeys keys);
+std::optional<std::uint8_t> LandedUniformMetadataByte(std::uint64_t address, std::size_t bytes);
 DccKeys CurrentDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes);
 DccKeys CurrentDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes, std::size_t keyCount);
 std::optional<DccKeys> KnownPendingDccKeys(std::uint64_t metaAddress, std::uint64_t surfaceBytes);

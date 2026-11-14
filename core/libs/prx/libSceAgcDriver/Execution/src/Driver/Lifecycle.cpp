@@ -180,6 +180,27 @@ void Driver::stop() {
 
 Driver::Driver() {
     InstallAsyncLog_nid_no_patch();
+    static const bool pulseTrace = std::getenv("APS5_TRACE_FLAG_PULSE") != nullptr;
+    if (pulseTrace) {
+        static std::jthread pulse([pulseTrace]() {
+            const auto started = std::chrono::steady_clock::now();
+            const auto elapsedSeconds = [&started] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(); };
+            std::array<std::uint32_t, 1024> previous{};
+            std::memcpy(previous.data(), reinterpret_cast<const void*>(0x1100000000ull), sizeof(previous));
+            std::fprintf(stderr, "[flag-pulse] page baseline at %.3f s\n", elapsedSeconds());
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                auto* page = reinterpret_cast<const std::uint32_t*>(0x1100000000ull);
+                for (std::size_t index = 0; index < previous.size(); ++index) {
+                    const auto value = page[index];
+                    if (value == previous[index]) continue;
+                    std::fprintf(stderr, "[flag-pulse] 0x%llx 0x%x -> 0x%x at %.3f s\n", static_cast<unsigned long long>(0x1100000000ull + index * 4), previous[index], value, elapsedSeconds());
+                    previous[index] = value;
+                }
+            }
+        });
+        static_cast<void>(pulse);
+    }
     static const bool driverMemory = (MapDriverMemory(), true);
     static_cast<void>(driverMemory);
     static_cast<void>(GuestMemory::TrackerGeneration());

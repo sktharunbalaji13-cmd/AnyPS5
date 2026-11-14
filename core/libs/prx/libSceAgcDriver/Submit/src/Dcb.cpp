@@ -41,6 +41,11 @@ std::uint32_t APS5_VABI sceAgcDriverWaitUntilSafeForRendering(std::uint32_t** co
 }
 
 int APS5_VABI sceAgcDriverSubmitDcb(const Packet* packet) {
+    static const bool trace = std::getenv("APS5_TRACE_SUBMITS") != nullptr;
+    if (trace) {
+        static std::atomic<std::uint64_t> count{0};
+        std::fprintf(stderr, "[submit-dcb] %llu caller=%p packet=%p\n", static_cast<unsigned long long>(++count), __builtin_return_address(0), static_cast<const void*>(packet));
+    }
     AgcDriver::Submit(packet, 0);
     return 0;
 }
