@@ -35,6 +35,44 @@ constexpr std::uint32_t SlabBlocks = static_cast<std::uint32_t>(SlabBytes / Bloc
 constexpr std::uint64_t ZeroBytes = SlabBytes;
 constexpr VkAccessFlags TransferredAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
 
+constexpr std::uint64_t rotate(std::uint64_t value, unsigned bits) {
+    return (value << bits) | (value >> (64u - bits));
+}
+
+std::uint64_t contentHash(std::uint64_t offset, std::span<const std::byte> bytes) {
+    constexpr std::uint64_t prime1 = 0x9e3779b185ebca87ull;
+    constexpr std::uint64_t prime2 = 0xc2b2ae3d27d4eb4full;
+    constexpr std::uint64_t prime3 = 0x165667b19e3779f9ull;
+    constexpr std::uint64_t prime4 = 0x85ebca77c2b2ae63ull;
+    constexpr std::uint64_t prime5 = 0x27d4eb2f165667c5ull;
+    const auto round = [](std::uint64_t accumulator, std::uint64_t lane) { return rotate(accumulator + lane * prime2, 31u) * prime1; };
+    const auto word = [&](std::size_t at) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, bytes.data() + at, sizeof(value));
+        return value;
+    };
+    const std::uint64_t seed = offset * prime5 + bytes.size();
+    std::array<std::uint64_t, 4> lanes{seed + prime1 + prime2, seed + prime2, seed, seed - prime1};
+    std::size_t at = 0;
+    for (; at + 32 <= bytes.size(); at += 32) {
+        for (std::size_t lane = 0; lane < lanes.size(); ++lane) lanes[lane] = round(lanes[lane], word(at + 8 * lane));
+    }
+    auto hash = rotate(lanes[0], 1u) + rotate(lanes[1], 7u) + rotate(lanes[2], 12u) + rotate(lanes[3], 18u);
+    for (const auto lane : lanes) hash = (hash ^ round(0, lane)) * prime1 + prime4;
+    for (; at + 8 <= bytes.size(); at += 8) hash = rotate(hash ^ round(0, word(at)), 27u) * prime1 + prime4;
+    if (at < bytes.size()) {
+        std::uint64_t tail = 0;
+        std::memcpy(&tail, bytes.data() + at, bytes.size() - at);
+        hash = rotate(hash ^ (tail * prime5), 11u) * prime1;
+    }
+    hash ^= hash >> 33u;
+    hash *= prime2;
+    hash ^= hash >> 29u;
+    hash *= prime3;
+    hash ^= hash >> 32u;
+    return hash | 1u;
+}
+
 [[noreturn]] void fail(const char* step, VkResult result) {
     char text[160];
     std::snprintf(text, sizeof(text), "%s failed (%d)", step, static_cast<int>(result));
@@ -76,7 +114,6 @@ class ResidentMemory {
 public:
     struct Slab {
         VkDeviceMemory memory = VK_NULL_HANDLE;
-        std::unique_ptr<std::byte[]> host;
         std::vector<std::uint32_t> free;
     };
 
@@ -123,7 +160,6 @@ public:
         }
         auto slab = std::make_unique<Slab>();
         slab->memory = allocate(SlabBytes, "vkAllocateMemory of a heap mirror slab");
-        slab->host = std::unique_ptr<std::byte[]>(new std::byte[SlabBytes]);
         for (std::uint32_t index = SlabBlocks; index-- > 1;) slab->free.push_back(index);
         slabs.push_back(std::move(slab));
         return {slabs.back().get(), 0u};
@@ -288,7 +324,14 @@ void populatedPages(std::vector<Candidate>& maybe, const Mapping& mapping) {
 std::vector<Candidate> possiblyNonzero(std::uint64_t begin, std::uint64_t end) {
     std::vector<Candidate> maybe;
 #ifdef _WIN32
-    maybe.push_back({begin, end, true});
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> zero;
+    GuestArena::GuestArenaKnownZero_nid_no_patch(static_cast<std::uintptr_t>(begin), static_cast<std::size_t>(end - begin), [](void* context, std::uintptr_t first, std::uintptr_t last) { static_cast<std::vector<std::pair<std::uintptr_t, std::uintptr_t>>*>(context)->emplace_back(first, last); }, &zero);
+    auto cursor = begin;
+    for (const auto& [first, last] : zero) {
+        if (first > cursor) maybe.push_back({cursor, first, true});
+        cursor = std::max<std::uint64_t>(cursor, last);
+    }
+    if (cursor < end) maybe.push_back({cursor, end, true});
 #else
     for (const auto& mapping : mappings(begin, end)) {
         int file = -1;
@@ -314,7 +357,14 @@ std::vector<Candidate> possiblyNonzero(std::uint64_t begin, std::uint64_t end) {
 }
 
 bool GuestBytesZero(std::uint64_t begin, std::uint64_t end) {
+#ifdef _WIN32
+    for (const auto& candidate : possiblyNonzero(begin, end)) {
+        if (!allZero(candidate.begin, candidate.end)) return false;
+    }
+    return true;
+#else
     return allZero(begin, end);
+#endif
 }
 
 GuestRuns GuestNonzeroBlocks(const GuestRuns& candidates) {
@@ -366,6 +416,7 @@ ResidentBuffer::ResidentBuffer(const Context& context, std::uint64_t base, std::
     origin = base / BlockSize * BlockSize;
     lead = base - origin;
     size = (lead + bytes + BlockSize - 1) / BlockSize * BlockSize;
+    guestEnd = base + bytes;
     try {
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         info.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_ALIASED_BIT;
@@ -388,6 +439,7 @@ ResidentBuffer::ResidentBuffer(const Context& context, std::uint64_t base, std::
         type = context.DeviceMemoryType(requirements.memoryTypeBits, SlabBytes, "a resident heap mirror slab");
         memory = residentMemory(context, type);
         slots.resize(static_cast<std::size_t>(size / BlockSize));
+        hashes = std::make_unique<std::atomic<std::uint64_t>[]>(slots.size());
         std::vector<bool> wanted(slots.size(), false);
         for (const auto& [first, last] : backed) {
             if (first >= last) continue;
@@ -397,8 +449,7 @@ ResidentBuffer::ResidentBuffer(const Context& context, std::uint64_t base, std::
         for (std::size_t index = 0; index < slots.size();) {
             if (wanted[index]) {
                 auto [slab, at] = memory->Take();
-                slots[index] = {slab, at, slab->host.get() + at * BlockSize};
-                std::memset(slots[index].host, 0, static_cast<std::size_t>(BlockSize));
+                slots[index] = {slab, at};
                 binds.push_back({index * BlockSize, BlockSize, slab->memory, at * BlockSize, 0});
                 ++bound;
                 ++index;
@@ -427,7 +478,7 @@ void ResidentBuffer::release() noexcept {
     if (buffer != VK_NULL_HANDLE) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
     buffer = VK_NULL_HANDLE;
     for (auto& slot : slots) {
-        if (slot.host != nullptr) memory->Put(static_cast<ResidentMemory::Slab*>(slot.slab), slot.index);
+        if (slot.slab != nullptr) memory->Put(static_cast<ResidentMemory::Slab*>(slot.slab), slot.index);
         slot = {};
     }
     auto& devices = Devices();
@@ -441,9 +492,15 @@ std::size_t ResidentBuffer::blockIndex(std::uint64_t guest) const {
     return static_cast<std::size_t>((guest - origin) / BlockSize);
 }
 
-std::byte* ResidentBuffer::Block(std::uint64_t guest) const {
-    const auto& slot = slots[blockIndex(guest)];
-    return slot.host == nullptr ? nullptr : slot.host + (guest - origin) % BlockSize;
+bool ResidentBuffer::Bound(std::uint64_t guest) const {
+    return slots[blockIndex(guest)].slab != nullptr;
+}
+
+bool ResidentBuffer::Unchanged(std::uint64_t guest, std::span<const std::byte> bytes) const {
+    const auto index = blockIndex(guest);
+    if (slots[index].slab == nullptr) return false;
+    const auto stored = hashes[index].load(std::memory_order_relaxed);
+    return stored != 0 && stored == contentHash((guest - origin) % BlockSize, bytes);
 }
 
 std::uint64_t ResidentBuffer::UnboundBytes(const GuestRuns& runs) const {
@@ -451,7 +508,7 @@ std::uint64_t ResidentBuffer::UnboundBytes(const GuestRuns& runs) const {
     for (const auto& [first, last] : runs) {
         if (first >= last) continue;
         for (auto index = blockIndex(first); index <= blockIndex(last - 1); ++index) {
-            if (slots[index].host == nullptr) seen.push_back(index);
+            if (slots[index].slab == nullptr) seen.push_back(index);
         }
     }
     std::sort(seen.begin(), seen.end());
@@ -464,10 +521,10 @@ void ResidentBuffer::Bind(const GuestRuns& runs) {
     for (const auto& [first, last] : runs) {
         if (first >= last) continue;
         for (auto index = blockIndex(first); index <= blockIndex(last - 1); ++index) {
-            if (slots[index].host != nullptr) continue;
+            if (slots[index].slab != nullptr) continue;
             auto [slab, at] = memory->Take();
-            slots[index] = {slab, at, slab->host.get() + at * BlockSize};
-            std::memset(slots[index].host, 0, static_cast<std::size_t>(BlockSize));
+            slots[index] = {slab, at};
+            hashes[index].store(0, std::memory_order_relaxed);
             binds.push_back({index * BlockSize, BlockSize, slab->memory, at * BlockSize, 0});
             made.push_back(index);
         }
@@ -502,16 +559,11 @@ void ResidentBuffer::MarkChanged(std::uint64_t begin, std::uint64_t end) {
     devices.pending.push_back(weak_from_this());
 }
 
-void ResidentBuffer::Read(std::uint64_t guest, std::span<std::byte> out) const {
-    std::size_t done = 0;
-    while (done < out.size()) {
-        const auto at = guest + done;
-        const auto within = static_cast<std::size_t>((at - origin) % BlockSize);
-        const auto length = std::min<std::size_t>(out.size() - done, static_cast<std::size_t>(BlockSize) - within);
-        if (const auto* source = Block(at); source != nullptr) std::memcpy(out.data() + done, source, length);
-        else std::memset(out.data() + done, 0, length);
-        done += length;
-    }
+void ResidentBuffer::Read(std::uint64_t guest, std::span<std::byte> out) {
+    if (out.empty()) return;
+    std::memset(out.data(), 0, out.size());
+    MarkChanged(guest, guest + out.size());
+    flush(guest, out);
 }
 
 void ResidentBuffer::Store(std::uint64_t guest, std::span<const std::byte> bytes) {
@@ -520,7 +572,7 @@ void ResidentBuffer::Store(std::uint64_t guest, std::span<const std::byte> bytes
         const auto at = guest + done;
         const auto within = static_cast<std::size_t>((at - origin) % BlockSize);
         const auto length = std::min<std::size_t>(bytes.size() - done, static_cast<std::size_t>(BlockSize) - within);
-        if (auto* target = Block(at); target != nullptr) std::memcpy(target, bytes.data() + done, length);
+        if (const auto index = blockIndex(at); slots[index].slab != nullptr) hashes[index].store(0, std::memory_order_relaxed);
         else Require(GuestBytesZero(reinterpret_cast<std::uintptr_t>(bytes.data() + done), reinterpret_cast<std::uintptr_t>(bytes.data() + done + length)), "the GPU wrote a heap mirror block that holds no memory");
         done += length;
     }
@@ -549,7 +601,7 @@ std::shared_ptr<Buffer> ResidentBuffer::readbackBatch(std::uint64_t guest, std::
     return staging;
 }
 
-void ResidentBuffer::flush() {
+void ResidentBuffer::flush(std::uint64_t captured, std::span<std::byte> capture) {
     GuestRuns runs;
     {
         std::lock_guard lock(changedMutex);
@@ -564,7 +616,7 @@ void ResidentBuffer::flush() {
         for (const auto& [first, last] : runs) {
             for (auto at = std::max(first, cursor); at < last;) {
                 const auto next = std::min(last, (at / BlockSize + 1) * BlockSize);
-                if (slots[blockIndex(at)].host != nullptr) {
+                if (slots[blockIndex(at)].slab != nullptr) {
                     if (!regions.empty() && regions.back().dstOffset + regions.back().size == at - origin) regions.back().size += next - at;
                     else regions.push_back({total, at - origin, next - at});
                     total += next - at;
@@ -579,21 +631,40 @@ void ResidentBuffer::flush() {
             std::vector<VkBufferCopy> copies;
         };
         std::vector<Chunk> chunks;
+        std::vector<std::pair<std::size_t, std::uint64_t>> stored;
+        std::vector<std::byte> scratch(static_cast<std::size_t>(BlockSize));
+        const auto guestBegin = origin + lead;
         VkDeviceSize filled = StagingChunkBytes;
         for (const auto& region : regions) {
             for (VkDeviceSize done = 0; done < region.size;) {
-                if (filled == StagingChunkBytes) {
-                    const auto remaining = total - (region.srcOffset + done);
-                    chunks.push_back({std::make_shared<Buffer>(context, static_cast<std::size_t>(std::min(StagingChunkBytes, remaining)), VK_BUFFER_USAGE_TRANSFER_SRC_BIT), {}});
-                    filled = 0;
-                }
-                auto& chunk = chunks.back();
                 const auto at = origin + region.dstOffset + done;
-                const auto length = std::min({region.size - done, BlockSize - (at - origin) % BlockSize, StagingChunkBytes - filled});
-                std::memcpy(chunk.staging->Bytes().data() + filled, Block(at), static_cast<std::size_t>(length));
-                if (!chunk.copies.empty() && chunk.copies.back().srcOffset + chunk.copies.back().size == filled && chunk.copies.back().dstOffset + chunk.copies.back().size == region.dstOffset + done) chunk.copies.back().size += length;
-                else chunk.copies.push_back({filled, region.dstOffset + done, length});
-                filled += length;
+                const auto length = std::min<VkDeviceSize>(region.size - done, BlockSize - (at - origin) % BlockSize);
+                const auto piece = std::span(scratch).first(static_cast<std::size_t>(length));
+                const auto from = std::min(std::max(at, guestBegin), at + length);
+                const auto to = std::max(from, std::min(at + length, guestEnd));
+                std::memset(piece.data(), 0, static_cast<std::size_t>(from - at));
+                std::memset(piece.data() + (to - at), 0, static_cast<std::size_t>(at + length - to));
+                if (from < to) {
+                    const auto held = piece.subspan(static_cast<std::size_t>(from - at), static_cast<std::size_t>(to - from));
+                    GuestMemory::CopyCommitted(from, held);
+                    stored.emplace_back(blockIndex(from), contentHash((from - origin) % BlockSize, held));
+                }
+                if (const auto low = std::max(at, captured), high = std::min(at + length, captured + capture.size()); low < high) std::memcpy(capture.data() + (low - captured), piece.data() + (low - at), static_cast<std::size_t>(high - low));
+                for (VkDeviceSize copied = 0; copied < length;) {
+                    if (filled == StagingChunkBytes) {
+                        const auto remaining = total - (region.srcOffset + done + copied);
+                        chunks.push_back({std::make_shared<Buffer>(context, static_cast<std::size_t>(std::min(StagingChunkBytes, remaining)), VK_BUFFER_USAGE_TRANSFER_SRC_BIT), {}});
+                        filled = 0;
+                    }
+                    auto& chunk = chunks.back();
+                    const auto part = std::min(length - copied, StagingChunkBytes - filled);
+                    const auto target = region.dstOffset + done + copied;
+                    std::memcpy(chunk.staging->Bytes().data() + filled, piece.data() + copied, static_cast<std::size_t>(part));
+                    if (!chunk.copies.empty() && chunk.copies.back().srcOffset + chunk.copies.back().size == filled && chunk.copies.back().dstOffset + chunk.copies.back().size == target) chunk.copies.back().size += part;
+                    else chunk.copies.push_back({filled, target, part});
+                    filled += part;
+                    copied += part;
+                }
                 done += length;
             }
         }
@@ -604,6 +675,7 @@ void ResidentBuffer::flush() {
             }
             kept.push_back(shared_from_this());
         });
+        for (const auto& [index, hash] : stored) hashes[index].store(hash, std::memory_order_relaxed);
     } catch (...) {
         {
             std::lock_guard lock(changedMutex);

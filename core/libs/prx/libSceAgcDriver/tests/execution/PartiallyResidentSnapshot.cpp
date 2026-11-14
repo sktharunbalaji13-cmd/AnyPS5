@@ -82,6 +82,14 @@ constexpr std::uint32_t LoadResult = 12;
 constexpr std::uint64_t ElementSpan = 1024;
 constexpr std::size_t PageBytes = 4096;
 constexpr std::array<std::uint64_t, 2> KeptSlabs{21, 22};
+constexpr std::uint32_t GameWidth = 320;
+constexpr std::uint32_t GameHeight = 1280;
+constexpr std::uint32_t GameDepth = 900;
+constexpr std::uint32_t GameMips = 5;
+constexpr std::uint32_t GameLanes = 8;
+constexpr std::array<std::uint32_t, 5> GameSlices{63, 136, 300, 431, 447};
+constexpr std::array<std::uint32_t, 4> GameTailSlices{5, 33, 330, 513};
+constexpr std::uint32_t GameCycles = 6;
 alignas(256) std::array<std::uint32_t, SampleThreads * SampleWords> Samples{};
 
 alignas(256) constexpr std::array<std::uint32_t, 36> VolumeSampleCode{
@@ -1041,6 +1049,258 @@ int SampleCommittedSurface(const CommittedCase& layout, bool changes) {
     return 0;
 }
 
+std::array<std::uint32_t, 8> GameViewDescriptor(std::uint64_t address) {
+    const std::uint32_t width = GameWidth;
+    const std::uint32_t height = GameHeight;
+    const std::uint32_t depth = GameDepth;
+    return {
+        static_cast<std::uint32_t>(address >> 8u),
+        static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (Format16x4Float << 20u) | (((width - 1u) & 3u) << 30u),
+        ((width - 1u) >> 2u) | ((height - 1u) << 14u),
+        0xfacu | (TileR64KBX << 20u) | (Type3D << 28u) | ((GameMips - 1u) << 16u),
+        depth - 1u,
+        (GameMips - 1u) << 4u,
+        0u,
+        0u,
+    };
+}
+
+void SampleView(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::uint32_t side, std::uint32_t height, std::uint32_t depth, std::span<const std::uint32_t> slices, std::uint32_t lanes, float lod, const std::array<std::uint32_t, 4>& samplerWords) {
+    const auto threads = static_cast<std::uint32_t>(slices.size()) * lanes;
+    Require(threads <= SampleThreads, "game volume sample grid too large");
+    Samples.fill(0xdeadbeefu);
+    const auto mip = static_cast<std::uint32_t>(lod);
+    const auto width = side >> mip;
+    const auto rows = height >> mip;
+    for (std::uint32_t tid = 0; tid < threads; ++tid) {
+        const auto slice = slices[tid / lanes] >> mip;
+        const auto lane = tid % lanes;
+        const auto x = (lane * 7u + 3u) % width;
+        const auto y = (lane * 13u + 5u) % rows;
+        const auto r = (static_cast<float>(slice) + 0.5f) / static_cast<float>(depth >> mip);
+        const std::array<std::uint32_t, 6> words{Bits((static_cast<float>(x) + 0.5f) / static_cast<float>(width)), Bits((static_cast<float>(y) + 0.5f) / static_cast<float>(rows)), Bits(r), lod != 0.0f ? Bits(lod) : x, y, slice};
+        std::copy(words.begin(), words.end(), &Samples[tid * SampleWords]);
+    }
+    const std::span<const std::uint32_t> code = lod != 0.0f ? std::span<const std::uint32_t>(VolumeExplicitLodCode) : std::span<const std::uint32_t>(VolumeSampleCode);
+    std::vector<std::uint32_t> userData(16, 0u);
+    const auto buffer = BufferDescriptor(Samples.data(), threads * SampleWords * 4u);
+    std::copy(buffer.begin(), buffer.end(), userData.begin());
+    std::copy(texture.begin(), texture.end(), userData.begin() + 4);
+    std::copy(samplerWords.begin(), samplerWords.end(), userData.begin() + 12);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{threads, 1, 1}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderRecompiler::ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory},
+        device.Target(),
+        {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    const auto result = ShaderRecompiler::Recompile(request);
+    device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    device.WaitIdle();
+}
+
+bool GameSlabCommitted(std::uint32_t slab) {
+    const bool inFirst = slab <= 136u;
+    const bool inSecond = slab >= 431u && slab <= 447u;
+    return inFirst || inSecond;
+}
+
+void CheckGameSamples(const std::string& name, std::span<const std::uint32_t> slices, std::uint32_t lanes, std::uint32_t lod) {
+    const auto threads = static_cast<std::uint32_t>(slices.size()) * lanes;
+    const auto results = lod != 0 ? std::vector<std::uint32_t>{SampleResult} : std::vector<std::uint32_t>{SampleResult, LoadResult};
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    for (std::uint32_t tid = 0; tid < threads; ++tid) {
+        const auto slice = slices[tid / lanes];
+        for (const auto result : results) {
+            std::array<float, 4> value{};
+            for (std::uint32_t component = 0; component < 4u; ++component) {
+                const auto word = Samples[tid * SampleWords + result + component];
+                value[component] = std::bit_cast<float>(word);
+                hash = (hash ^ word) * 0x100000001b3ull;
+            }
+            const auto where = name + ": " + (result == SampleResult ? "sample" : "load") + " of level " + std::to_string(lod) + " slice " + std::to_string(slice) + " (thread " + std::to_string(tid) + ") reads " + TexelText(value);
+            const bool zeros = value[0] == 0.0f && value[1] == 0.0f && value[2] == 0.0f && value[3] == 0.0f;
+            if (GameSlabCommitted(slice >> lod)) Require(!zeros && value[0] != 0.0f && value[3] == 1.0f, where + ", expected the texels of committed slices");
+            else Require(zeros, where + ", expected the zeros of uncommitted slices");
+        }
+    }
+    std::printf("%s: level %u sample results hash %016llx\n", name.c_str(), lod, static_cast<unsigned long long>(hash));
+}
+
+int SampleGameVolume() {
+    const auto device = OpenVulkanTestDevice();
+    if (!device) return Skipped;
+    auto context = device->graphicsContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    const auto words0 = GameViewDescriptor(BlockBytes);
+    const auto probe = DescribeSurface(DecodeTextureResource(words0));
+    Require(probe.layerBytes != 0 && probe.guestBytes % probe.layerBytes == 0 && probe.layers == GameDepth, "the game view descriptor does not split into whole slices");
+    ReservedSurface surface(static_cast<std::size_t>(probe.guestBytes));
+    const auto words = GameViewDescriptor(surface.Address());
+    const auto geometry = DescribeSurface(DecodeTextureResource(words));
+    for (std::uint32_t slab = 0; slab <= 136u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    for (std::uint32_t slab = 431u; slab <= 447u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    std::printf("game view: %llu guest bytes, %llu layer bytes, %u layers\n", static_cast<unsigned long long>(geometry.guestBytes), static_cast<unsigned long long>(geometry.layerBytes), geometry.layers);
+    for (std::uint32_t cycle = 0; cycle < GameCycles; ++cycle) {
+        std::shared_ptr<Texture> texture;
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            AgcDriver::GuestMemory::BumpCollectEpoch();
+            texture = CachedSampledTexture(context, words);
+        }
+        Require(texture != nullptr && !texture->ViewsStorageImage(), "the game view was not built through a sparse snapshot");
+        std::printf("game volume cycle %u: %llu of %llu MiB bound\n", cycle, static_cast<unsigned long long>(texture->AllocationBytes() >> 20u), static_cast<unsigned long long>(geometry.guestBytes >> 20u));
+        SampleView(*device, words, GameWidth, GameHeight, GameDepth, GameSlices, GameLanes, 0.0f, SamplerDescriptor());
+        CheckGameSamples("the game volume", GameSlices, GameLanes, 0u);
+        SampleView(*device, words, GameWidth, GameHeight, GameDepth, GameTailSlices, GameLanes, 4.0f, SamplerDescriptor());
+        CheckGameSamples("the game volume tail", GameTailSlices, GameLanes, 4u);
+        ClearCachedTextures(context.device);
+    }
+    return 0;
+}
+
+void SampleViewZ(AgcDriver::VulkanDevice& device, const std::array<std::uint32_t, 8>& texture, std::uint32_t side, std::uint32_t height, std::uint32_t depth, float z, std::uint32_t lanes, float lod, const std::array<std::uint32_t, 4>& samplerWords) {
+    Require(lanes <= SampleThreads, "game volume z grid too large");
+    Samples.fill(0xdeadbeefu);
+    const auto mip = static_cast<std::uint32_t>(lod);
+    const auto width = side >> mip;
+    const auto rows = height >> mip;
+    for (std::uint32_t tid = 0; tid < lanes; ++tid) {
+        const auto x = (tid * 7u + 3u) % width;
+        const auto y = (tid * 13u + 5u) % rows;
+        const std::array<std::uint32_t, 6> words{Bits((static_cast<float>(x) + 0.5f) / static_cast<float>(width)), Bits((static_cast<float>(y) + 0.5f) / static_cast<float>(rows)), Bits(z), Bits(lod), x, y};
+        std::copy(words.begin(), words.end(), &Samples[tid * SampleWords]);
+    }
+    const std::span<const std::uint32_t> code = std::span<const std::uint32_t>(VolumeExplicitLodCode);
+    std::vector<std::uint32_t> userData(16, 0u);
+    const auto buffer = BufferDescriptor(Samples.data(), lanes * SampleWords * 4u);
+    std::copy(buffer.begin(), buffer.end(), userData.begin());
+    std::copy(texture.begin(), texture.end(), userData.begin() + 4);
+    std::copy(samplerWords.begin(), samplerWords.end(), userData.begin() + 12);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{lanes, 1, 1}, 0u, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderRecompiler::ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory},
+        device.Target(),
+        {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    const auto result = ShaderRecompiler::Recompile(request);
+    device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    device.WaitIdle();
+}
+
+void CheckGameZFinite(const std::string& name, std::uint32_t lanes) {
+    for (std::uint32_t tid = 0; tid < lanes; ++tid) {
+        for (std::uint32_t word = SampleResult; word < SampleResult + 4u; ++word) {
+            const auto value = std::bit_cast<float>(Samples[tid * SampleWords + word]);
+            Require(std::isfinite(value), name + ": thread " + std::to_string(tid) + " read a non-finite sample");
+        }
+    }
+    std::printf("%s: z boundary samples finite\n", name.c_str());
+}
+
+void CheckGameSamplesFinite(const std::string& name, std::span<const std::uint32_t> slices, std::uint32_t lanes) {
+    const auto threads = static_cast<std::uint32_t>(slices.size()) * lanes;
+    for (std::uint32_t tid = 0; tid < threads; ++tid) {
+        for (std::uint32_t word = SampleResult; word < SampleResult + 4u; ++word) {
+            const auto value = std::bit_cast<float>(Samples[tid * SampleWords + word]);
+            Require(std::isfinite(value), name + ": thread " + std::to_string(tid) + " read a non-finite sample");
+        }
+    }
+    std::printf("%s: filtered sample results finite\n", name.c_str());
+}
+
+int SampleGameVolumeFiltered() {
+    const auto device = OpenVulkanTestDevice();
+    if (!device) return Skipped;
+    auto context = device->graphicsContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    const auto words0 = GameViewDescriptor(BlockBytes);
+    const auto probe = DescribeSurface(DecodeTextureResource(words0));
+    Require(probe.layerBytes != 0 && probe.guestBytes % probe.layerBytes == 0 && probe.layers == GameDepth, "the game view descriptor does not split into whole slices");
+    ReservedSurface surface(static_cast<std::size_t>(probe.guestBytes));
+    const auto words = GameViewDescriptor(surface.Address());
+    const auto geometry = DescribeSurface(DecodeTextureResource(words));
+    for (std::uint32_t slab = 0; slab <= 136u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    for (std::uint32_t slab = 431u; slab <= 447u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    std::shared_ptr<Texture> texture;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        texture = CachedSampledTexture(context, words);
+    }
+    Require(texture != nullptr && !texture->ViewsStorageImage(), "the game view was not built through a sparse snapshot");
+    std::printf("game volume filtered: %llu of %llu MiB bound\n", static_cast<unsigned long long>(texture->AllocationBytes() >> 20u), static_cast<unsigned long long>(geometry.guestBytes >> 20u));
+    const std::array<std::uint32_t, 4> linearSampler{0u, 0xfffu << 12u, (1u << 26u) | (1u << 20u) | (1u << 22u), 0u};
+    for (const auto lod : {0.5f, 1.5f, 2.5f, 3.5f, 4.5f}) {
+        SampleView(*device, words, GameWidth, GameHeight, GameDepth, GameSlices, GameLanes, lod, linearSampler);
+        CheckGameSamplesFinite("the game volume filtered lod " + std::to_string(lod), GameSlices, GameLanes);
+        std::printf("game volume filtered: lod %g sampled\n", static_cast<double>(lod));
+    }
+    for (std::uint32_t cycle = 1; cycle < GameCycles; ++cycle) {
+        ClearCachedTextures(context.device);
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            AgcDriver::GuestMemory::BumpCollectEpoch();
+            texture = CachedSampledTexture(context, words);
+        }
+        Require(texture != nullptr && !texture->ViewsStorageImage(), "the game view rebuild failed");
+        SampleView(*device, words, GameWidth, GameHeight, GameDepth, GameSlices, GameLanes, 3.5f, linearSampler);
+        CheckGameSamplesFinite("the game volume filtered rebuild " + std::to_string(cycle), GameSlices, GameLanes);
+        std::printf("game volume filtered: cycle %u done\n", cycle);
+    }
+    return 0;
+}
+
+int SampleGameVolumeZ() {
+    const auto device = OpenVulkanTestDevice();
+    if (!device) return Skipped;
+    auto context = device->graphicsContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    const auto words0 = GameViewDescriptor(BlockBytes);
+    const auto probe = DescribeSurface(DecodeTextureResource(words0));
+    Require(probe.layerBytes != 0 && probe.guestBytes % probe.layerBytes == 0 && probe.layers == GameDepth, "the game view descriptor does not split into whole slices");
+    ReservedSurface surface(static_cast<std::size_t>(probe.guestBytes));
+    const auto words = GameViewDescriptor(surface.Address());
+    const auto geometry = DescribeSurface(DecodeTextureResource(words));
+    for (std::uint32_t slab = 0; slab <= 136u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    for (std::uint32_t slab = 431u; slab <= 447u; ++slab) CommitSlab(surface, geometry, Format16x4Float, slab, static_cast<std::size_t>(geometry.layerBytes));
+    std::shared_ptr<Texture> texture;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        texture = CachedSampledTexture(context, words);
+    }
+    Require(texture != nullptr && !texture->ViewsStorageImage(), "the game view was not built through a sparse snapshot");
+    std::printf("game volume z: %llu of %llu MiB bound\n", static_cast<unsigned long long>(texture->AllocationBytes() >> 20u), static_cast<unsigned long long>(geometry.guestBytes >> 20u));
+    const std::array<std::uint32_t, 4> linearSampler{0u, 0xfffu << 12u, (1u << 26u) | (1u << 20u) | (1u << 22u), 0u};
+    for (const auto probeZ : {std::pair{144.0f / 900.0f, 0.0f}, std::pair{449.0f / 900.0f, 0.0f}, std::pair{32.0f / 112.0f, 3.0f}, std::pair{32.0f / 112.0f, 3.5f}}) {
+        SampleViewZ(*device, words, GameWidth, GameHeight, GameDepth, probeZ.first, 64u, probeZ.second, linearSampler);
+        CheckGameZFinite("the game volume z boundary z=" + std::to_string(probeZ.first) + " lod=" + std::to_string(probeZ.second), 64u);
+        std::printf("game volume z: z=%g lod=%g sampled\n", static_cast<double>(probeZ.first), static_cast<double>(probeZ.second));
+    }
+    for (std::uint32_t cycle = 1; cycle < GameCycles; ++cycle) {
+        ClearCachedTextures(context.device);
+        {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            AgcDriver::GuestMemory::BumpCollectEpoch();
+            texture = CachedSampledTexture(context, words);
+        }
+        Require(texture != nullptr && !texture->ViewsStorageImage(), "the game view rebuild failed");
+        SampleViewZ(*device, words, GameWidth, GameHeight, GameDepth, 144.0f / 900.0f, 64u, 0.0f, linearSampler);
+        CheckGameZFinite("the game volume z rebuild " + std::to_string(cycle), 64u);
+        std::printf("game volume z: cycle %u done\n", cycle);
+    }
+    return 0;
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -1052,6 +1312,16 @@ int main(int argc, char** argv) {
         const std::string_view mode = argc == 2 ? std::string_view(argv[1]) : std::string_view();
         if (mode == "--committed-volume-page-samples") {
             const auto status = SampleDecommittedPage();
+            if (status == 0) std::puts("partially resident snapshot tests passed");
+            return status;
+        }
+        if (mode == "--committed-volume-game-samples") {
+            const auto status = SampleGameVolume();
+            if (status == 0) std::puts("partially resident snapshot tests passed");
+            return status;
+        }
+        if (mode == "--committed-volume-game-filter-samples") {
+            const auto status = SampleGameVolumeFiltered();
             if (status == 0) std::puts("partially resident snapshot tests passed");
             return status;
         }

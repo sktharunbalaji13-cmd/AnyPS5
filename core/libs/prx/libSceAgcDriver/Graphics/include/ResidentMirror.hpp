@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RESIDENTMIRROR_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,11 +38,12 @@ public:
     std::uint64_t Origin() const { return origin; }
     std::uint64_t BoundBytes() const { return bound * BlockBytes; }
     std::uint32_t MemoryType() const { return type; }
-    std::byte* Block(std::uint64_t guest) const;
+    bool Bound(std::uint64_t guest) const;
+    bool Unchanged(std::uint64_t guest, std::span<const std::byte> bytes) const;
     std::uint64_t UnboundBytes(const GuestRuns& runs) const;
     void Bind(const GuestRuns& runs);
     void MarkChanged(std::uint64_t begin, std::uint64_t end);
-    void Read(std::uint64_t guest, std::span<std::byte> out) const;
+    void Read(std::uint64_t guest, std::span<std::byte> out);
     void Store(std::uint64_t guest, std::span<const std::byte> bytes);
     std::shared_ptr<Buffer> RecordReadback(VkCommandBuffer commands, std::uint64_t guest, std::uint64_t bytes) const;
     void ReadDevice(std::uint64_t guest, std::span<std::byte> out);
@@ -51,12 +53,11 @@ private:
     struct Slot {
         void* slab = nullptr;
         std::uint32_t index = 0;
-        std::byte* host = nullptr;
     };
     ResidentBuffer(const Context& context, std::uint64_t base, std::uint64_t bytes, const GuestRuns& backed);
     std::size_t blockIndex(std::uint64_t guest) const;
     void submit(const std::vector<VkSparseMemoryBind>& binds);
-    void flush();
+    void flush(std::uint64_t captured = 0, std::span<std::byte> capture = {});
     std::shared_ptr<Buffer> readbackBatch(std::uint64_t guest, std::uint64_t bytes);
     void release() noexcept;
 
@@ -68,8 +69,10 @@ private:
     std::uint64_t origin = 0;
     std::uint64_t lead = 0;
     std::uint64_t size = 0;
+    std::uint64_t guestEnd = 0;
     std::uint64_t bound = 0;
     std::vector<Slot> slots;
+    std::unique_ptr<std::atomic<std::uint64_t>[]> hashes;
     std::mutex changedMutex;
     GuestRuns changed;
 };

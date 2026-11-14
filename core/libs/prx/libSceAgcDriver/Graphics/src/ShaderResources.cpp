@@ -210,6 +210,11 @@ struct TextureCache {
 
 constexpr unsigned FruitlessScanFactor = 8;
 std::atomic<std::size_t> fruitlessScanEntries{1024};
+
+bool keepRecentDisabled() {
+    static const bool disabled = std::getenv("APS5_RECLAIM_RECENT_TEXTURES") != nullptr;
+    return disabled;
+}
 std::atomic<std::int64_t> fruitlessScanFloorNanos{500000};
 
 TextureCache& Textures() {
@@ -1735,6 +1740,9 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
     bool sampledRepeated = false;
     bool sampledScanned = false;
     bool storageSkipped = false;
+    const bool keepRecent = ReclaimForHostPlaceable() && !keepRecentDisabled();
+    const auto present = Recorder::Presents();
+    bool recentKept = false;
     {
         auto& cache = Textures();
         std::unique_lock lock(cache.mutex, std::defer_lock);
@@ -1747,6 +1755,10 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
             sampledScanned = cache.entries.size() >= fruitlessScanEntries.load(std::memory_order_relaxed);
             for (auto it = cache.entries.end(); it != cache.entries.begin() && freed < bytes;) {
                 --it;
+                if (keepRecent && it->present + 1u >= present) {
+                    recentKept = true;
+                    break;
+                }
                 if (it->texture.use_count() != 1 || (it->source != nullptr && it->source->Dirty())) continue;
                 const auto next = std::next(it);
                 eraseTexture(cache, it);
@@ -1757,7 +1769,7 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
             }
         }
     }
-    if (freed < bytes && !sampledRepeated) {
+    if (freed < bytes && !sampledRepeated && !keepRecent) {
         auto& cache = StorageTextures();
         std::unique_lock<GuestMemory::GpuMutexType> gpu(GuestMemory::GpuMutex(), std::defer_lock);
         const bool inherited = storageCacheHeld != 0;
@@ -1805,7 +1817,7 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
         }
     }
     freed = ImageMemoryReleasedBytes() - releasedBefore;
-    if (sampledScanned && freed == 0 && sampledEntries == 0 && storageEntries == 0 && !storageSkipped) {
+    if (sampledScanned && !keepRecent && freed == 0 && sampledEntries == 0 && storageEntries == 0 && !storageSkipped) {
         const auto ended = std::chrono::steady_clock::now();
         const std::chrono::nanoseconds floor(fruitlessScanFloorNanos.load(std::memory_order_relaxed));
         const auto window = std::max<std::chrono::nanoseconds>(ended - started, floor / FruitlessScanFactor) * FruitlessScanFactor;
@@ -1813,7 +1825,12 @@ std::uint64_t ReleaseTextureCaches(std::uint64_t bytes, bool newImage) {
     } else if (freed != 0) {
         Textures().fruitlessUntilNanos.store(0, std::memory_order_relaxed);
     }
-    static std::atomic<std::uint64_t> fruitless{0};
+    static std::atomic<std::uint64_t> fruitless{0}, kept{0};
+    if (recentKept && freed < bytes) {
+        const auto count = kept.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] texture caches kept the textures of frames %llu and %llu for an allocation that can be placed in host memory: %llu of %llu MiB released, %zu sampled entries evicted; %llu such releases\n", static_cast<unsigned long long>(present == 0 ? 0 : present - 1), static_cast<unsigned long long>(present), static_cast<unsigned long long>(freed >> 20u), static_cast<unsigned long long>(bytes >> 20u), sampledEntries, static_cast<unsigned long long>(count));
+        return freed;
+    }
     const bool nothing = freed == 0;
     const auto repeats = nothing ? fruitless.fetch_add(1, std::memory_order_relaxed) + 1 : std::uint64_t{0};
     if (!nothing || repeats <= 5 || (repeats & (repeats - 1)) == 0) {
@@ -7079,7 +7096,7 @@ void ShaderResources::WriteBack() {
     std::exception_ptr unaligned;
     try {
         WriteBackBuffers();
-    } catch (const BdaUnalignedAccess&) {
+    } catch (...) {
         unaligned = std::current_exception();
     }
     if (!guestMemory.Writes().empty() || std::find(storageWritten.begin(), storageWritten.end(), true) != storageWritten.end() || (usesBda && !bdaReadOnly)) GuestMemory::BreakProofs();
@@ -7149,16 +7166,16 @@ void ShaderResources::CheckFaults() const {
 }
 
 void ShaderResources::WriteBackBuffers() {
-    std::exception_ptr unaligned;
+    std::exception_ptr fault;
     if (bda) {
         try {
             bda->CheckFault();
-        } catch (const BdaUnalignedAccess&) {
-            unaligned = std::current_exception();
+        } catch (...) {
+            fault = std::current_exception();
         }
     }
     if (!SkipWriteBack()) guestMemory.WriteBack();
-    if (unaligned) std::rethrow_exception(unaligned);
+    if (fault) std::rethrow_exception(fault);
 }
 
 std::span<const std::byte> ShaderResources::AddressTableBytes() const {

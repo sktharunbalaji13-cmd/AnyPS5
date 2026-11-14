@@ -150,6 +150,19 @@ std::uint64_t& DeviceProcLookups();
 
 inline constexpr std::size_t EmptyBufferBytes = 16;
 
+inline bool& ReclaimForHostPlaceable() {
+    thread_local bool active = false;
+    return active;
+}
+
+struct ReclaimForHostPlaceableScope {
+    bool previous = ReclaimForHostPlaceable();
+    ReclaimForHostPlaceableScope() { ReclaimForHostPlaceable() = true; }
+    ~ReclaimForHostPlaceableScope() { ReclaimForHostPlaceable() = previous; }
+    ReclaimForHostPlaceableScope(const ReclaimForHostPlaceableScope&) = delete;
+    ReclaimForHostPlaceableScope& operator=(const ReclaimForHostPlaceableScope&) = delete;
+};
+
 struct Context {
     VkDevice device;
     VkPhysicalDevice physical;
@@ -372,7 +385,11 @@ struct Context {
         if (!host) return type;
         if (cacheReclaim != nullptr) {
             const auto wanted = bytes + (report.usage > report.budget ? report.usage - report.budget : 0u);
-            const auto released = cacheReclaim(wanted, true);
+            VkDeviceSize released = 0;
+            {
+                const ReclaimForHostPlaceableScope placeable;
+                released = cacheReclaim(wanted, true);
+            }
             if (released >= wanted) return type;
             if (released != 0) {
                 const auto after = ReportedHeap(heap);
