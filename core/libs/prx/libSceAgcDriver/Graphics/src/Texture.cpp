@@ -2308,8 +2308,12 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
             blockGenerations(generations);
             stampedBlocks.assign(generations.size(), 0);
             cpuBlocks.assign(generations.size(), 0);
-            tracked = GuestMemory::ChangedBlocks(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), generations, stampedBlocks, cpuBlocks);
-            if (!tracked) awaitStoredSave(nullptr);
+            tracked = current != 0 && GuestMemory::ChangedBlocks(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), generations, stampedBlocks, cpuBlocks);
+            if (!tracked) {
+                std::fill(stampedBlocks.begin(), stampedBlocks.end(), GuestMemory::BlockWritten);
+                std::fill(cpuBlocks.begin(), cpuBlocks.end(), std::uint8_t{1});
+                awaitStoredSave(nullptr);
+            }
             const auto firstBlock = static_cast<std::size_t>(scopeBegin / 65536 - descriptor.baseAddress / 65536);
             const auto blocks = static_cast<std::size_t>((scopeBegin + scopeBytes - 1) / 65536 - scopeBegin / 65536 + 1);
             compared = !tracked && (scoped ? compareUntracked(scopeBegin, scopeBytes, std::span(stampedBlocks).subspan(firstBlock, blocks), true) : compareUntracked(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), stampedBlocks, true));
@@ -2458,7 +2462,7 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
     // unit's stamps say nothing, so it is stored.
     const auto droppable = [&](std::uint32_t unit) {
         if (!blockUnits) return false;
-        if (keysChanged && IsDccClear(keys) && !HasWritesSinceFill(unit)) return true;
+        if (keysChanged && IsDccClear(keys)) return true;
         if (compared) return stampedBlocks.at(unit) == GuestMemory::BlockWritten;
         if (guestBytes >= 16 * 1024 * 1024) return false;
         if (!tracked || layerGeneration[unit] == 0 || unit >= stampedBlocks.size() || stampedBlocks[unit] != GuestMemory::BlockWritten) return false;
@@ -2482,12 +2486,30 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
         }
         std::fprintf(stderr, "[dcc-keys] refresh 0x%llx+0x%llx keys %s -> %s (dirty %d, %zu pending units, %zu cpu-stamped units%s)\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), DccKeysName(uploadedKeys), DccKeysName(keys), dirty ? 1 : 0, pendingUnits, stampedUnits, keyFlip ? ", flip keeps unstamped results" : "");
     }
+    const auto keepPendingOnClear = [&](std::uint32_t layer) {
+        return keysChanged && IsDccClear(keys) && layerPending[layer];
+    };
     const bool selectedCpu = !direct && keys == DccKeys::Uncompressed && !cpuUploadLayers(changed).empty();
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (!layerPending[layer]) continue;
+        if (keepPendingOnClear(layer)) {
+            changed[layer] = false;
+            if (direct) continue;
+            stored[layer] = true;
+            anyStored = true;
+            continue;
+        }
         if (keyFlip && layerGeneration[layer] != 0 && stampedBlocks[layer] != GuestMemory::BlockWritten) {
             changed[layer] = false;
             keyFlipKept.fetch_add(1, std::memory_order_relaxed);
+            if (direct) continue;
+            stored[layer] = true;
+            anyStored = true;
+            continue;
+        }
+        const bool layerStamped = layer < stampedBlocks.size() && stampedBlocks[layer] == GuestMemory::BlockWritten;
+        if (!cpuWrote && !layerStamped) {
+            changed[layer] = false;
             if (direct) continue;
             stored[layer] = true;
             anyStored = true;
@@ -6233,7 +6255,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // bypasses the per-packet collect memo (a Refresh collect earlier in the same packet would
     // satisfy it); the unselected layers keep their own generations and are collected by their
     // own refreshes. One tracker lock then reads the span's stamps against the layers' generations.
-    GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored));
+    const bool walked = GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored)) != 0;
     std::vector<std::uint64_t> generations(spanBlocks, 0);
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (!layers[layer]) continue;
@@ -6243,7 +6265,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     const auto drawn = drawnArea();
     std::vector<std::uint8_t> changedBlocks(spanBlocks);
     std::vector<std::uint8_t> cpuBlocks(drawn.drawn ? spanBlocks : 0);
-    const bool tracked = GuestMemory::ChangedBlocks(firstStored, static_cast<std::size_t>(lastStored - firstStored), generations, changedBlocks, cpuBlocks);
+    const bool tracked = walked && GuestMemory::ChangedBlocks(firstStored, static_cast<std::size_t>(lastStored - firstStored), generations, changedBlocks, cpuBlocks);
     std::vector<bool> compared(trackedLayers, false);
     if (!tracked) {
         awaitStoredSave(&layers);

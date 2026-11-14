@@ -3396,6 +3396,20 @@ std::shared_ptr<Graphics::StorageTexture> PresentableResident(const Graphics::Co
     if (resident == nullptr) {
         resident = Graphics::StorageTexture::FindLive(buffer.address, DisplayBufferSize(buffer));
     }
+    static const bool tracePresentResident = std::getenv("APS5_TRACE_PRESENT_RESIDENT") != nullptr;
+    if (tracePresentResident) {
+        std::fprintf(stderr, "[present-resident] buffer=0x%llx size=%llu pending=%d resident=%p dirty=%d writes=%llu writesAtFill=%llu generation=%llu cached=%d tile=%d %ux%u layers=%u\n",
+            static_cast<unsigned long long>(buffer.address), static_cast<unsigned long long>(DisplayBufferSize(buffer)), pending ? 1 : 0,
+            static_cast<void*>(resident.get()), resident ? (resident->Dirty() ? 1 : 0) : -1,
+            resident ? static_cast<unsigned long long>(resident->Writes()) : 0ULL,
+            resident ? static_cast<unsigned long long>(resident->WritesAtFill()) : 0ULL,
+            resident ? static_cast<unsigned long long>(resident->Generation()) : 0ULL,
+            resident ? (resident->Cached() ? 1 : 0) : -1,
+            resident ? static_cast<int>(resident->Descriptor().tileMode) : -1,
+            resident ? resident->Descriptor().width : 0u,
+            resident ? resident->Descriptor().height : 0u,
+            resident ? resident->ImageLayers() : 0u);
+    }
     if (resident == nullptr) return resident;
     const auto path = ResidentPresentable(context, *resident, buffer, filter, layer);
     if (path == ResidentPresent::None) resident.reset();
@@ -3410,7 +3424,7 @@ Graphics::DccKeys ResidentKeys(const Graphics::StorageTexture& resident) {
 }
 
 bool ResidentServesDisplay(const Graphics::StorageTexture& resident, const DisplayBuffer& buffer) {
-    return ResidentServesDisplay(resident.Descriptor().baseAddress, resident.Descriptor().dccAddress, resident.UploadedKeys(), resident.FilledKeys(), resident.HasWritesSinceFill(), [&] { return ResidentKeys(resident); }, buffer);
+    return ResidentServesDisplay(resident.Descriptor().baseAddress, resident.Descriptor().dccAddress, resident.UploadedKeys(), resident.FilledKeys(), resident.Dirty(), [&] { return ResidentKeys(resident); }, buffer);
 }
 
 bool ResidentKeysMoved(const Graphics::StorageTexture& resident) {
@@ -3573,21 +3587,31 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer, const Displ
     VkFilter filter = VK_FILTER_LINEAR;
     bool convert = false;
     std::uint32_t layer = 0;
+    bool pending = false;
+    bool refreshed = false;
     if (!NoResidentPresent()) {
-        bool pending = false;
         resident = PresentableResident(graphicsContext(), buffer, filter, pending, convert, layer);
         if (resident != nullptr && buffer.dccAddress != 0 && !ResidentServesDisplay(*resident, buffer)) {
             resident.reset();
             convert = false;
         }
         if (resident != nullptr) {
-            if (RefreshPresented(*resident, buffer, layer)) ++refreshedPresents;
+            refreshed = RefreshPresented(*resident, buffer, layer);
+            if (refreshed) ++refreshedPresents;
             ++residentPresents;
         } else if (pending) {
             ++unsuitable;
         } else {
             ++notPending;
         }
+    }
+    static const bool tracePresentResident = std::getenv("APS5_TRACE_PRESENT_RESIDENT") != nullptr;
+    if (tracePresentResident) {
+        std::fprintf(stderr, "[present-display] buffer=0x%llx resident=%p pending=%d refreshed=%d served=%d generation=%llu dirty=%d writes=%llu writesAtFill=%llu cached=%d\n",
+            static_cast<unsigned long long>(buffer.address), static_cast<void*>(resident.get()), pending ? 1 : 0, refreshed ? 1 : 0,
+            resident != nullptr ? 1 : 0, resident ? static_cast<unsigned long long>(resident->Generation()) : 0ULL,
+            resident ? (resident->Dirty() ? 1 : 0) : -1, resident ? static_cast<unsigned long long>(resident->Writes()) : 0ULL,
+            resident ? static_cast<unsigned long long>(resident->WritesAtFill()) : 0ULL, resident ? (resident->Cached() ? 1 : 0) : -1);
     }
     const auto cleared = buffer.dccAddress != 0 && resident == nullptr ? CompressedClearPixel(buffer, bytes) : std::nullopt;
     bool dumpFrame = false;
